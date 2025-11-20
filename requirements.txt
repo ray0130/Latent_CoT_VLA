@@ -1,0 +1,5 @@
+tfds-nightly
+apache-beam
+numpy
+tqdm
+torch

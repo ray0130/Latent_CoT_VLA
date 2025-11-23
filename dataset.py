@@ -104,8 +104,9 @@ def discretize_action_7d(action_7d, bin_edges):
 
 
 def build_trajectories():
-    print("Loading action bin edges from", ACTION_BIN_EDGES_PATH)
-    bin_edges = np.load(ACTION_BIN_EDGES_PATH)  # (7, 257)
+    print("Loading Raw Actions. Not Binned")
+    # print("Loading action bin edges from", ACTION_BIN_EDGES_PATH)
+    # bin_edges = np.load(ACTION_BIN_EDGES_PATH)  # (7, 257)
 
     b = tfds.builder_from_directory(builder_dir=dataset2path(DATASET_NAME))
     ds = b.as_dataset(split=SPLIT, read_config=tfds.ReadConfig(add_tfds_id=False))
@@ -182,8 +183,9 @@ def build_trajectories():
                     steps[t + k]["action"]["rotation_delta"],              # (3,)
                     steps[t + k]["action"]["gripper_closedness_action"],   # (1,)
                 ], axis=0).astype(np.float32)
-                tok7 = discretize_action_7d(action_7d, bin_edges)
-                act_tokens.append(tok7)
+                # tok7 = discretize_action_7d(action_7d, bin_edges)
+                # act_tokens.append(tok7)
+                act_tokens.append(action_7d)
             act_tokens = np.stack(act_tokens, axis=0)  # (M_ACTION, 7)
 
             # Append to buffer
@@ -203,10 +205,10 @@ def build_trajectories():
 
 if __name__ == "__main__":
     # 1) compute bin edges for action discretization
-    if not os.path.exists(ACTION_BIN_EDGES_PATH):
-        compute_action_bin_edges()
-    else:
-        print("Bin edges already exist, skipping computation.")
-
+    # if not os.path.exists(ACTION_BIN_EDGES_PATH):
+    #     compute_action_bin_edges()
+    # else:
+    #     print("Bin edges already exist, skipping computation.")
+    print("Skipping computing Bin since we save raw actions")
     # 2) trajectory + tokenize + save shards
     build_trajectories()

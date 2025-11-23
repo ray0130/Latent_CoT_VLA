@@ -170,6 +170,164 @@ def generate_video_prompt(num_video_frames: int, video_key_frame_interval: Optio
 
     return prompt
 
+class CoTVLADataset(Dataset):
+    def __init__(self, 
+                 data_samples: list, 
+                 tokenizer, 
+                 image_processor, 
+                 rqvae_model, 
+                 action_tokenizer):
+        """
+        rqvae_model: The loaded VILA-U vision tower (RQ-VAE). 
+                     Ideally kept on CPU or a separate inference GPU to save VRAM.
+        """
+        self.data = data_samples
+        self.tokenizer = tokenizer
+        self.image_processor = image_processor
+        self.rqvae_model = rqvae_model
+        self.action_tokenizer = action_tokenizer
+
+        self.action_start_id = tokenizer.convert_tokens_to_ids("<action_start>")
+        self.action_end_id = tokenizer.convert_tokens_to_ids("<action_end>")
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        sample = self.data[idx]
+
+        # ------------------------------------------------------------------
+        # 1. LOAD NUMPY ARRAYS
+        # ------------------------------------------------------------------
+        # curr_img_arr: Shape [H, W, 3], 0-255, uint8
+        curr_img_arr = np.load(sample['current_npy']) 
+        future_img_arr = np.load(sample['future_npy']) 
+        
+        raw_action = np.array(sample['action_vec'], dtype=np.float32)
+        instruction = sample['instruction']
+
+        # ------------------------------------------------------------------
+        # 2. VISION ENCODER INPUT (SigLIP)
+        # ------------------------------------------------------------------
+        # Returns: {'pixel_values': tensor [1, 3, 336, 336]} (or 384 depending on config)
+        image_tensor = self.image_processor.preprocess(curr_img_arr, return_tensors='pt')['pixel_values'][0]
+
+        # ------------------------------------------------------------------
+        # 3. SUBGOAL (Visual Tokens via RQ-VAE)
+        # ------------------------------------------------------------------
+        # RQ-VAE expects specific preprocessing (usually 256x256, [-1, 1])
+        vq_input = self._preprocess_numpy_for_rqvae(future_img_arr)
+        
+        with torch.no_grad():
+            # RQ-VAE encode usually returns indices of shape [B, H, W, D] or [B, D, H, W]
+            # VILA-U codebase likely has a wrapper that handles this.
+            # We assume .get_code_indices() or similar returns [B, H*W*D] or [B, H, W, D]
+            
+            # Example call (Pseudo-code, adapt to exact VILA-U method name):
+            # codes = self.rqvae_model.get_codes(vq_input.unsqueeze(0)) 
+            
+            # If using standard RQ-VAE:
+            codes = self.rqvae_model.encode(vq_input.unsqueeze(0)) # [B, Depth, H, W]
+            
+            # FLATTEN STRATEGY: (B, D, H, W) -> (B, H, W, D) -> (B, Sequence_Len)
+            # We want "Depth" to be the innermost dimension so the LLM predicts 
+            # the coarse token, then the fine tokens for that same patch, then moves to next patch.
+            codes = codes.permute(0, 2, 3, 1) # [B, H, W, D]
+            subgoal_indices = codes.reshape(-1).cpu() # Flatten to 1D sequence [H*W*D]
+
+        # ------------------------------------------------------------------
+        # 4. ACTION TOKENS
+        # ------------------------------------------------------------------
+        action_bins = self.action_tokenizer.encode_actions(raw_action)
+        action_token_strs = [f"<action_{b}>" for b in action_bins]
+        action_ids = [self.tokenizer.convert_tokens_to_ids(t) for t in action_token_strs]
+        action_ids = torch.tensor(action_ids, dtype=torch.long)
+
+        # ------------------------------------------------------------------
+        # 5. STITCH & MASK
+        # ------------------------------------------------------------------
+        prompt = f"{DEFAULT_IMAGE_TOKEN}\nUser: {instruction}\nAssistant: "
+        prompt_ids = self.tokenizer(prompt, return_tensors='pt', add_special_tokens=True).input_ids[0]
+
+        input_ids = torch.cat([
+            prompt_ids,
+            subgoal_indices, # Now a long sequence of RQ tokens
+            torch.tensor([self.action_start_id]),
+            action_ids,
+            torch.tensor([self.action_end_id])
+        ])
+
+        labels = input_ids.clone()
+        labels[:len(prompt_ids)] = IGNORE_INDEX
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "images": image_tensor
+        }
+
+    def _preprocess_numpy_for_rqvae(self, img_arr):
+        """
+        RQ-VAE generally uses 256x256 resolution and [-1, 1] norm.
+        """
+        tensor = torch.from_numpy(img_arr).permute(2, 0, 1).float() 
+        
+        # Resize to 256x256 (RQ-VAE standard)
+        if tensor.shape[1] != 256 or tensor.shape[2] != 256:
+             tensor = torch.nn.functional.interpolate(
+                tensor.unsqueeze(0), size=(256, 256), mode='bilinear', align_corners=False
+            ).squeeze(0)
+            
+        # Normalize [-1, 1]
+        tensor = (tensor / 127.5) - 1.0
+        return tensor
+
+@dataclass
+class CoTVLADataCollator:
+    tokenizer: transformers.PreTrainedTokenizer
+
+    def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        """
+        instances: A list of the dictionaries returned by __getitem__
+                   [{'input_ids': ..., 'labels': ..., 'images': ...}, ...]
+        """
+        # 1. Extract the parts
+        input_ids_list = [instance['input_ids'] for instance in instances]
+        labels_list = [instance['labels'] for instance in instances]
+        images_list = [instance['images'] for instance in instances]
+
+        # 2. Pad Input IDs (Right Padding)
+        # We pad with the tokenizer's pad_token_id
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids_list,
+            batch_first=True,
+            padding_value=self.tokenizer.pad_token_id
+        )
+
+        # 3. Pad Labels
+        # We pad with IGNORE_INDEX (-100) so the model doesn't calculate loss on the padding
+        labels = torch.nn.utils.rnn.pad_sequence(
+            labels_list,
+            batch_first=True,
+            padding_value=IGNORE_INDEX
+        )
+
+        # 4. Stack Images
+        # Since all images are resized to 384x384 (or 336) by SigLIP, 
+        # we can just stack them directly.
+        images = torch.stack(images_list, dim=0)
+
+        # 5. Handle Attention Mask (Optional but Recommended)
+        # 1 = Real Token, 0 = Padding
+        # This tells the model "don't pay attention to the empty padding at the end"
+        attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
+
+        return {
+            'input_ids': input_ids,
+            'labels': labels,
+            'images': images,
+            'attention_mask': attention_mask
+        }
 
 class LazySupervisedDataset(Dataset):
     def __init__(

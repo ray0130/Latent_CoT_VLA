@@ -29,6 +29,9 @@ from vila_u.data.simple_vila_webdataset import VILAWebDataset
 from vila_u.mm_utils import tokenizer_image_token, opencv_extract_frames, process_image
 from vila_u.train.args import DataArguments, TrainingArguments
 
+import glob
+import bisect
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 PIL.Image.MAX_IMAGE_PIXELS = 1000000000
 
@@ -170,41 +173,73 @@ def generate_video_prompt(num_video_frames: int, video_key_frame_interval: Optio
 
     return prompt
 
-class CoTVLADataset(Dataset):
-    def __init__(self, 
-                 data_samples: list, 
-                 tokenizer, 
-                 image_processor, 
-                 rqvae_model, 
-                 action_tokenizer):
-        """
-        rqvae_model: The loaded VILA-U vision tower (RQ-VAE). 
-                     Ideally kept on CPU or a separate inference GPU to save VRAM.
-        """
-        self.data = data_samples
+# class CoTVLADataset(Dataset):
+class ShardedCoTVLADataset(Dataset):
+    def __init__(self, data_dir, tokenizer, image_processor, rqvae_model, action_tokenizer):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.rqvae_model = rqvae_model
         self.action_tokenizer = action_tokenizer
-
-        self.action_start_id = tokenizer.convert_tokens_to_ids("<action_start>")
-        self.action_end_id = tokenizer.convert_tokens_to_ids("<action_end>")
+        
+        # 1. FIND ALL SHARDS
+        self.shard_paths = sorted(glob.glob(f"{data_dir}/*.npz"))
+        
+        # 2. BUILD THE ADDRESS BOOK (The Mapping)
+        # We need to know where each shard "starts" in the global sequence.
+        self.shard_starts = [] 
+        self.total_length = 0
+        
+        print("Building dataset index (peeking at headers)...")
+        
+        for p in self.shard_paths:
+            # Record the starting ID for this shard
+            self.shard_starts.append(self.total_length)
+            
+            # Peek at the file to get its length WITHOUT loading data
+            # mmap_mode='r' reads the shape/header metadata instantly
+            try:
+                with np.load(p, mmap_mode='r') as data:
+                    # Assuming 'action_vec' exists and represents the number of steps
+                    # shape[0] is usually the number of samples
+                    n_samples = data['action_vec'].shape[0]
+                    self.total_length += n_samples
+            except Exception as e:
+                print(f"Skipping corrupt shard {p}: {e}")
+                
+        print(f"Total samples: {self.total_length}")
+        print(f"Shard start indices: {self.shard_starts}")
 
     def __len__(self):
-        return len(self.data)
+        # The DataLoader asks "How many items total?"
+        return self.total_length
 
-    def __getitem__(self, idx):
-        sample = self.data[idx]
-
-        # ------------------------------------------------------------------
-        # 1. LOAD NUMPY ARRAYS
-        # ------------------------------------------------------------------
-        # curr_img_arr: Shape [H, W, 3], 0-255, uint8
-        curr_img_arr = np.load(sample['current_npy']) 
-        future_img_arr = np.load(sample['future_npy']) 
+    def __getitem__(self, global_idx):
+        # 1. LOCATE THE SHARD
+        # Use bisect to find which bucket 'global_idx' falls into.
+        # This returns the insertion point. We subtract 1 to get the shard index.
+        shard_idx = bisect.bisect_right(self.shard_starts, global_idx) - 1
         
-        raw_action = np.array(sample['action_vec'], dtype=np.float32)
-        instruction = sample['instruction']
+        # 2. CALCULATE LOCAL INDEX
+        # global 1200 - start 1000 = local 200
+        local_idx = global_idx - self.shard_starts[shard_idx]
+        
+        shard_path = self.shard_paths[shard_idx]
+
+        # 3. LOAD DATA (Lazy)
+        # Now we open just the specific shard we need
+        data = np.load(shard_path, mmap_mode='r')
+        
+        # Retrieve the specific row
+        curr_img_arr = data['current_img'][local_idx]
+        future_img_arr = data['future_img'][local_idx]
+        raw_action = data['action_vec'][local_idx]
+        
+        # Note: If instruction is duplicated 10k times in the shard, 
+        # it might be stored as one string or an array. Handle accordingly.
+        if data['instruction'].ndim == 0:
+            instruction = str(data['instruction'])
+        else:
+            instruction = str(data['instruction'][local_idx])
 
         # ------------------------------------------------------------------
         # 2. VISION ENCODER INPUT (SigLIP)

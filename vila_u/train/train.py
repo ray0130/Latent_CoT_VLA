@@ -21,10 +21,52 @@ from vila_u.train.utils import (
     mprint,
 )
 
+# import cotvla dataset and datacollator and action tokenizer
+from vila_u.data.dataset import ShardedCoTVLADataset, CoTVLADataCollator
+from vila_u.model.language_model.action_tokenizer import ActionTokenizer
+import numpy as np
+
+
 local_rank = None
 
 if "WANDB_PROJECT" not in os.environ:
     os.environ["WANDB_PROJECT"] = "VILA-U"
+
+def make_cotvla_data_module(tokenizer, data_args, model):
+    """
+    Creates the CoT-VLA specific dataset and collator.
+    """
+    # 1. Load Action Stats (Min/Max from your .npy file)
+    # You might want to add 'action_stats_path' to DataArguments
+    action_stats_path = getattr(data_args, "action_stats_path", "path/to/bin_edges.npy") 
+    
+    print(f"Loading action tokenizer stats from {action_stats_path}...")
+    bin_edges = np.load(action_stats_path)
+    action_stats = {"min": bin_edges[:, 0], "max": bin_edges[:, -1]}
+    
+    action_tokenizer = ActionTokenizer(
+        tokenizer_type="discretization",
+        action_stats=action_stats
+    )
+
+    # 2. Extract the Vision Tower (RQ-VAE) to pass to the dataset
+    # VILA-U structure: model -> get_vision_tower() -> vision_tower -> rqvaesiglip
+    # Adjust this access path based on exact repo structure if it errors
+    vision_tower = model.get_vision_tower()
+
+    # 3. Create Dataset
+    train_dataset = ShardedCoTVLADataset(
+        data_dir=data_args.data_path, # Path to folder containing .npz shards
+        tokenizer=tokenizer,
+        image_processor=data_args.image_processor,
+        rqvae_model=vision_tower, 
+        action_tokenizer=action_tokenizer
+    )
+
+    # 4. Create Collator
+    data_collator = CoTVLADataCollator(tokenizer=tokenizer)
+
+    return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
@@ -183,6 +225,28 @@ def train():
             conversation_lib.default_conversation = conversation_lib.conv_templates[
                 "vicuna_v1"
             ]
+    
+    # ==========================================================================
+    # ### [NEW] ACTION TOKEN INJECTION START
+    # ==========================================================================
+    print("Injecting CoT-VLA Action Tokens into Tokenizer...")
+    
+    # 1. Define the new tokens
+    action_tokens = [f"<action_{i}>" for i in range(256)]
+    special_action_tokens = ["<action_start>", "<action_end>"]
+    
+    # 2. Resize and Smart-Init
+    # We add them as 'additional_special_tokens' so they are not split by BPE
+    smart_tokenizer_and_embedding_resize(
+        special_tokens_dict={"additional_special_tokens": special_action_tokens + action_tokens},
+        tokenizer=tokenizer,
+        model=model.llm, # VILA-U wraps the core llama in .llm
+    )
+    
+    print(f"Added {len(action_tokens) + 2} action tokens. Vocabulary size: {len(tokenizer)}")
+    # ==========================================================================
+    # ### [NEW] ACTION TOKEN INJECTION END
+    # ==========================================================================
 
     model.llm.pad_token_id = tokenizer.pad_token_id
     model.llm.config.tokenizer_padding_side = tokenizer.padding_side
@@ -207,11 +271,25 @@ def train():
         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
 
-    data_module = make_supervised_data_module(
+    
+    # ==========================================================================
+    # ### [NEW] REPLACE DATA MODULE CALL
+    # ==========================================================================
+    # Old:
+    # data_module = make_supervised_data_module(
+    #     tokenizer=tokenizer,
+    #     data_args=data_args,
+    #     training_args=training_args,
+    # )  
+    #   
+    data_module = make_cotvla_data_module(
         tokenizer=tokenizer,
         data_args=data_args,
-        training_args=training_args,
+        model=model
     )
+    # ==========================================================================
+
+
     callbacks = [AutoResumeCallback()]
     trainer = VILAUTrainer(
         model=model,

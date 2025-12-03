@@ -12,15 +12,15 @@ from tqdm import tqdm
 
 
 DATASET_NAME = "fractal20220817_data"
-SPLIT = "train"
+SPLIT = "train[200:220]"
 N_SUBGOAL = 5 # curr: steps[t], subgoal: steps[t+N_SUBGOAL]
 M_ACTION = 5 # action chunk: steps[t:t+M_ACTION]; shape (M_ACTION, 7)
 MAX_EPISODES = 5 # or set to small int while debugging
 SHARD_SIZE = 50 # how many samples per saved shard
 
-OUTPUT_DIR = "./rt1_cot"
+OUTPUT_DIR = "./test_data/rt1_100/eval"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-ACTION_BIN_EDGES_PATH = "./action_bin_edges.npy" # Path for bin edges for action discretization. shape (7, 257)
+ACTION_BIN_EDGES_PATH = "./test_data/action_bin_edges.npy" # Path for bin edges for action discretization. shape (7, 257)
 
 
 # [from Open_X_Embodiment_Datasets.ipynb]
@@ -115,9 +115,9 @@ def build_trajectories():
     shard_idx = 0
     buffer = {
         "instruction": [],
-        "curr_visual_tokens": [],
-        "subgoal_visual_tokens": [],
-        "action_tokens": [], # shape (M_ACTION, 7)
+        "curr_img": [],
+        "subgoal_img": [],
+        "action_vec": [], # shape (M_ACTION, 7)
     }
 
     def flush_buffer():
@@ -128,17 +128,17 @@ def build_trajectories():
         np.savez_compressed(
             out_path,
             instruction=np.array(buffer["instruction"], dtype=object),
-            curr_visual_tokens=np.stack(buffer["curr_visual_tokens"], axis=0),
-            subgoal_visual_tokens=np.stack(buffer["subgoal_visual_tokens"], axis=0),
-            action_tokens=np.stack(buffer["action_tokens"], axis=0),
+            curr_img=np.stack(buffer["curr_img"], axis=0),
+            subgoal_img=np.stack(buffer["subgoal_img"], axis=0),
+            action_vec=np.stack(buffer["action_vec"], axis=0),
         )
         print(f"Saved shard {shard_idx} with {len(buffer['instruction'])} samples -> {out_path}")
         shard_idx += 1
         buffer = {
             "instruction": [],
-            "curr_visual_tokens": [],
-            "subgoal_visual_tokens": [],
-            "action_tokens": [],
+            "curr_img": [],
+            "subgoal_img": [],
+            "action_vec": [],
         }
 
     for epi_idx, episode in enumerate(tqdm(ds, desc="Episodes (windowing)")):
@@ -172,8 +172,8 @@ def build_trajectories():
             # === Visual tokens ===
             curr_img = curr_step["observation"]["image"] # (256, 320, 3)
             subgoal_img = subgoal_step["observation"]["image"]
-            curr_vis_tokens = to_visual_token(curr_img)
-            subgoal_vis_tokens = to_visual_token(subgoal_img)
+            # curr_vis_tokens = to_visual_token(curr_img)
+            # subgoal_vis_tokens = to_visual_token(subgoal_img)
 
             # === Action tokens: (M_ACTION, 7) ===
             act_tokens = []
@@ -190,9 +190,9 @@ def build_trajectories():
 
             # Append to buffer
             buffer["instruction"].append(instr)
-            buffer["curr_visual_tokens"].append(curr_vis_tokens)
-            buffer["subgoal_visual_tokens"].append(subgoal_vis_tokens)
-            buffer["action_tokens"].append(act_tokens)
+            buffer["curr_img"].append(curr_img)
+            buffer["subgoal_img"].append(subgoal_img)
+            buffer["action_vec"].append(act_tokens)
 
             # Flush if shard full
             if len(buffer["instruction"]) >= SHARD_SIZE:

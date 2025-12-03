@@ -32,3 +32,10 @@ site_pkg_path=$(python -c 'import site; print(site.getsitepackages()[0])')
 cp -rv ./vila_u/train/transformers_replace/* $site_pkg_path/transformers/
 # Avoid confused warning
 rm -rf $site_pkg_path/lmms_eval/models/mplug_owl_video/modeling_mplug_owl.py
+
+# Downgrade PEFT to match older version of trasnformers
+pip install "peft==0.10.0"
+
+# Download Tensorflow Datasets to run download data script
+# pip install tensorflow_datasets
+# pip install gcsfs

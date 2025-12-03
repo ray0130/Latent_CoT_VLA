@@ -175,15 +175,18 @@ def generate_video_prompt(num_video_frames: int, video_key_frame_interval: Optio
 
 # class CoTVLADataset(Dataset):
 class ShardedCoTVLADataset(Dataset):
-    def __init__(self, data_dir, tokenizer, image_processor, rqvae_model, action_tokenizer):
+    def __init__(self, data_dir, tokenizer, image_processor, rqvae_model, action_tokenizer, data_args):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.rqvae_model = rqvae_model
         self.action_tokenizer = action_tokenizer
+        self.data_args = data_args
         
+        self.data_dir = data_dir
+        print(f"getting data from {self.data_dir}")
         # 1. FIND ALL SHARDS
         self.shard_paths = sorted(glob.glob(f"{data_dir}/*.npz"))
-        
+        print(f"Debug: All Shards: {self.shard_paths}")
         # 2. BUILD THE ADDRESS BOOK (The Mapping)
         # We need to know where each shard "starts" in the global sequence.
         self.shard_starts = [] 
@@ -230,8 +233,8 @@ class ShardedCoTVLADataset(Dataset):
         data = np.load(shard_path, mmap_mode='r')
         
         # Retrieve the specific row
-        curr_img_arr = data['current_img'][local_idx]
-        future_img_arr = data['future_img'][local_idx]
+        curr_img_arr = data['curr_img'][local_idx]
+        future_img_arr = data['subgoal_img'][local_idx]
         raw_action = data['action_vec'][local_idx]
         
         # Note: If instruction is duplicated 10k times in the shard, 
@@ -245,8 +248,10 @@ class ShardedCoTVLADataset(Dataset):
         # 2. VISION ENCODER INPUT (SigLIP)
         # ------------------------------------------------------------------
         # Returns: {'pixel_values': tensor [1, 3, 336, 336]} (or 384 depending on config)
-        image_tensor = self.image_processor.preprocess(curr_img_arr, return_tensors='pt')['pixel_values'][0]
+        # image_tensor = self.image_processor.preprocess(curr_img_arr, return_tensors='pt')['pixel_values'][0]
+        img_tensor = process_image(curr_img_arr, self.data_args, None)
 
+        subgoal_img_tensor = process_image(future_img_arr, self.data_args, None)
         # ------------------------------------------------------------------
         # 3. SUBGOAL (Visual Tokens via RQ-VAE)
         # ------------------------------------------------------------------

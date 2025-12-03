@@ -54,27 +54,40 @@ def make_cotvla_data_module(tokenizer, data_args, training_args, model):
     # VILA-U structure: model -> get_vision_tower() -> vision_tower -> rqvaesiglip
     # Adjust this access path based on exact repo structure if it errors
     vision_tower = model.get_vision_tower()
-    data_path = "test_data/rt_1_100"
+    data_path = "test_data/rt1_100"
     print(f"Loading CoT Data From: {data_path}")
+
     # 3. Create Dataset
     train_dataset = ShardedCoTVLADataset(
         data_dir=os.path.join(data_path, "train"), # Path to folder containing .npz shards
         tokenizer=tokenizer,
-        image_processor=data_args.image_processor,
-        rqvae_model=vision_tower, 
+        data_args=data_args,
+        # vision_tower=vision_tower,
         action_tokenizer=action_tokenizer
     )
     eval_dataset = ShardedCoTVLADataset(
         data_dir=os.path.join(data_path, "eval"), # Path to folder containing .npz shards
         tokenizer=tokenizer,
-        image_processor=data_args.image_processor,
-        rqvae_model=vision_tower, 
+        data_args=data_args,
+        # vision_tower=vision_tower,
         action_tokenizer=action_tokenizer
     )
 
-    # 4. Create Collator
-    data_collator = CoTVLADataCollator(tokenizer=tokenizer)
+    print(f"Train Dataset length: {len(train_dataset)}")
+    print(f"Eval Dataset length: {len(eval_dataset)}")
 
+    print("Printing Train Dataset First Example:")
+    print(train_dataset[0])
+
+    # 4. Create Collator
+    data_collator = CoTVLADataCollator(
+        tokenizer=tokenizer,
+        data_args=data_args,
+    )
+# tokenizer=tokenizer,
+#     data_args=data_args,
+#     action_tokenizer=action_tokenizer,
+# )
     # 5. 
     training_args.sample_lens = [len(train_dataset)]
     training_args.eval_sample_lens = [len(eval_dataset)]

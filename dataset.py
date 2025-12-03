@@ -12,13 +12,13 @@ from tqdm import tqdm
 
 
 DATASET_NAME = "fractal20220817_data"
-SPLIT = "train[200:220]"
+SPLIT = "train[:100]"
 N_SUBGOAL = 5 # curr: steps[t], subgoal: steps[t+N_SUBGOAL]
 M_ACTION = 5 # action chunk: steps[t:t+M_ACTION]; shape (M_ACTION, 7)
-MAX_EPISODES = 5 # or set to small int while debugging
+MAX_EPISODES = 20 # or set to small int while debugging
 SHARD_SIZE = 50 # how many samples per saved shard
 
-OUTPUT_DIR = "./test_data/rt1_100/eval"
+OUTPUT_DIR = "./test_data/rt1_100/train"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 ACTION_BIN_EDGES_PATH = "./test_data/action_bin_edges.npy" # Path for bin edges for action discretization. shape (7, 257)
 

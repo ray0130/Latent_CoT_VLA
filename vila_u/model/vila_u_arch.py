@@ -285,7 +285,13 @@ class VILAUMetaForCausalLM(ABC):
         input_ids_copy = input_ids.clone()
         input_ids_copy[input_ids_copy == IMAGE_TOKEN_INDEX] = 0
         input_embeds = self.llm.model.embed_tokens(input_ids_copy)
-
+        
+        for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask):
+            print(f"Input IDS range: {cur_input_ids.min()}, {cur_input_ids.max()}")
+            print(f"attention Mask range: {cur_attention_mask.min()}, {cur_attention_mask.max()}")
+            print(f"Shapes in VILA Model: input ids{cur_input_ids.shape}, attention mask: {cur_attention_mask.shape}")
+            x = cur_input_ids[cur_attention_mask] # Should fail at some point
+            
         input_ids = [
             cur_input_ids[cur_attention_mask] for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)
         ]

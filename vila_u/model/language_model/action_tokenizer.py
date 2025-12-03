@@ -38,29 +38,6 @@ class ActionTokenizer:
         # [Contract] Set "action_token_begin_idx" based on `self.tokenizer.vocab_size - (self.n_bins + 1)`
         #   =>> Assumes we're always overwriting the final `n_bins` tokens of the vocabulary!
         self.action_token_begin_idx: int = int(self.tokenizer.vocab_size - (self.n_bins + 1))
-    # def __init__(
-    #     self, tokenizer: PreTrainedTokenizerBase, action_bins, bins: int = 256
-    # ) -> None:
-    #     """
-    #     ## Changed to take in an action bin file
-    #     Discretizes continuous robot actions into N bins per dimension and maps to the least used tokens.
-
-    #     NOTE =>> by default, assumes a BPE-style tokenizer akin to the LlamaTokenizer, where *the least used tokens*
-    #              appear at the end of the vocabulary!
-
-    #     :param tokenizer: Base LLM/VLM tokenizer to extend.
-    #     :param bins: Number of bins for each continuous value; we'll adopt a uniform binning strategy.
-    #     :paream action_bins: The np loaded action bins
-    #     """
-    #     self.tokenizer, self.n_bins = tokenizer, bins
-
-    #     self.bins = action_bins
-    #     # Create Uniform Bins + Compute Bin Centers
-    #     self.bin_centers = (self.bins[:-1] + self.bins[1:]) / 2.0
-
-    #     # [Contract] Set "action_token_begin_idx" based on `self.tokenizer.vocab_size - (self.n_bins + 1)`
-    #     #   =>> Assumes we're always overwriting the final `n_bins` tokens of the vocabulary!
-    #     self.action_token_begin_idx: int = int(self.tokenizer.vocab_size - (self.n_bins + 1))
 
     def __call__(self, action: np.ndarray) -> Union[str, List[str]]:
         """Clip & bin actions to *the last `n_bins` tokens* of the vocabulary (e.g., tokenizer.vocab[-256:])."""
@@ -72,6 +49,21 @@ class ActionTokenizer:
             return self.tokenizer.decode(list(self.tokenizer.vocab_size - discretized_action))
         else:
             return self.tokenizer.batch_decode((self.tokenizer.vocab_size - discretized_action).tolist())
+
+    def encode_actions(self, action: np.ndarray) -> np.ndarray:
+        """
+        New: return integer token ids for the given continuous action vector.
+
+        - action: shape (D,) or (N, D)
+        - returns: np.ndarray of int64 token ids
+        """
+        action = np.clip(action, a_min=float(self.min_action), a_max=float(self.max_action))
+        discretized_action = np.digitize(action, self.bins)
+
+        # Map to the last n_bins tokens of the vocab, same as __call__ but without decode
+        token_ids = self.tokenizer.vocab_size - discretized_action
+
+        return token_ids.astype(np.int64)
 
     def decode_token_ids_to_actions(self, action_token_ids: np.ndarray) -> np.ndarray:
         """

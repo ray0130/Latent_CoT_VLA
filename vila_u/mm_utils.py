@@ -159,6 +159,9 @@ def process_image(image_file, data_args, image_folder, generation_mode=False):
         else:
             assert hasattr(data_args.image_processor, "size")
             crop_size = data_args.image_processor.size
+        # print("Data args image processor: ")
+        # print(data_args.image_processor)
+        # print("Crop Size: ", crop_size)
         image = image.resize((crop_size["height"], crop_size["width"]))
     elif data_args.image_aspect_ratio == "pad":
         image = expand2square(image, tuple(int(x * 255) for x in processor.image_mean))

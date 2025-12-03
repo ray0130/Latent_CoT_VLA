@@ -29,6 +29,9 @@ from vila_u.data.simple_vila_webdataset import VILAWebDataset
 from vila_u.mm_utils import tokenizer_image_token, opencv_extract_frames, process_image
 from vila_u.train.args import DataArguments, TrainingArguments
 
+from vila_u.model.multimodal_encoder.rqvaesigliptransformer_encoder import RQVAESIGLIPTransformerVisionTower
+
+
 import glob
 import bisect
 
@@ -173,201 +176,290 @@ def generate_video_prompt(num_video_frames: int, video_key_frame_interval: Optio
 
     return prompt
 
-# class CoTVLADataset(Dataset):
+# # 2. Build conversation: human with image token + instruction, assistant initially empty
+        # user_text = f"{DEFAULT_IMAGE_TOKEN}\n{instruction}"
+
+        # conversation = [
+        #     {"from": "human", "value": user_text},
+        #     {"from": "gpt",   "value": ""},
+        # ]
+        # sources = [conversation]
+
+        # # 3. Use VILA preprocessing to build prompt token ids
+        # sources = preprocess_multimodal(copy.deepcopy(sources), self.data_args)
+        # data_dict = preprocess(
+        #     sources,
+        #     self.tokenizer,
+        #     has_image=True,
+        #     no_system_prompt=getattr(self.data_args, "no_system_prompt", False),
+        # )
+
+
 class ShardedCoTVLADataset(Dataset):
-    def __init__(self, data_dir, tokenizer, image_processor, rqvae_model, action_tokenizer, data_args):
-        self.tokenizer = tokenizer
-        self.image_processor = image_processor
-        self.rqvae_model = rqvae_model
-        self.action_tokenizer = action_tokenizer
-        self.data_args = data_args
-        
+    """
+    CoT VLA dataset for VILA U.
+
+    Input per example:
+      - current image (as VILA style "image")
+      - text instruction, with DEFAULT_IMAGE_TOKEN indicating where the image is referenced
+
+    Output token sequence:
+      [prompt tokens]
+      [subgoal visual tokens]
+      <action_start>  [action tokens]  <action_end>
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        tokenizer: transformers.PreTrainedTokenizer,
+        data_args,
+        vision_tower: RQVAESIGLIPTransformerVisionTower,
+        action_tokenizer,
+        act_start_token: str = "<action_start>",
+        act_end_token: str = "<action_end>",
+        shard_suffix: str = ".npz",
+    ) -> None:
+        super().__init__()
+
         self.data_dir = data_dir
-        print(f"getting data from {self.data_dir}")
-        # 1. FIND ALL SHARDS
-        self.shard_paths = sorted(glob.glob(f"{data_dir}/*.npz"))
-        print(f"Debug: All Shards: {self.shard_paths}")
-        # 2. BUILD THE ADDRESS BOOK (The Mapping)
-        # We need to know where each shard "starts" in the global sequence.
-        self.shard_starts = [] 
-        self.total_length = 0
-        
-        print("Building dataset index (peeking at headers)...")
-        
-        for p in self.shard_paths:
-            # Record the starting ID for this shard
-            self.shard_starts.append(self.total_length)
-            
-            # Peek at the file to get its length WITHOUT loading data
-            # mmap_mode='r' reads the shape/header metadata instantly
-            try:
-                with np.load(p, mmap_mode='r') as data:
-                    # Assuming 'action_vec' exists and represents the number of steps
-                    # shape[0] is usually the number of samples
-                    n_samples = data['action_vec'].shape[0]
-                    self.total_length += n_samples
-            except Exception as e:
-                print(f"Skipping corrupt shard {p}: {e}")
-                
-        print(f"Total samples: {self.total_length}")
-        print(f"Shard start indices: {self.shard_starts}")
+        self.tokenizer = tokenizer
+        self.data_args = data_args
+        self.vision_tower = vision_tower
+        self.action_tokenizer = action_tokenizer
 
-    def __len__(self):
-        # The DataLoader asks "How many items total?"
-        return self.total_length
+        # These tokens are already added in train() via smart_tokenizer_and_embedding_resize
+        self.act_start_id = tokenizer.convert_tokens_to_ids(act_start_token)
+        self.act_end_id = tokenizer.convert_tokens_to_ids(act_end_token)
 
-    def __getitem__(self, global_idx):
-        # 1. LOCATE THE SHARD
-        # Use bisect to find which bucket 'global_idx' falls into.
-        # This returns the insertion point. We subtract 1 to get the shard index.
-        shard_idx = bisect.bisect_right(self.shard_starts, global_idx) - 1
-        
-        # 2. CALCULATE LOCAL INDEX
-        # global 1200 - start 1000 = local 200
+        # Sanity checks: if either token is unknown, something is wrong with the train-time injection
+        assert self.act_start_id != tokenizer.unk_token_id, (
+            f"{act_start_token} is not in tokenizer vocab. "
+            "Make sure you added it before constructing the dataset."
+        )
+        assert self.act_end_id != tokenizer.unk_token_id, (
+            f"{act_end_token} is not in tokenizer vocab. "
+            "Make sure you added it before constructing the dataset."
+        )
+
+        # Use the final vocab size (after action tokens) for visual token offset
+        self.text_vocab_size = tokenizer.vocab_size
+
+        # Discover shards
+        shard_paths: List[str] = []
+        for fname in sorted(os.listdir(data_dir)):
+            if fname.endswith(shard_suffix):
+                shard_paths.append(os.path.join(data_dir, fname))
+
+        if not shard_paths:
+            raise ValueError(f"No shards with suffix {shard_suffix} found in {data_dir}")
+
+        self.shard_paths = shard_paths
+
+        # Precompute prefix sums of shard sizes for global indexing
+        shard_sizes = []
+        for path in self.shard_paths:
+            with np.load(path, mmap_mode="r") as data:
+                shard_sizes.append(data["curr_img"].shape[0])
+        self.shard_starts = np.cumsum([0] + shard_sizes)
+        self._len = self.shard_starts[-1]
+
+    def __len__(self) -> int:
+        return self._len
+
+    def _get_shard_and_local_idx(self, global_idx: int):
+        shard_idx = int(np.searchsorted(self.shard_starts, global_idx, side="right") - 1)
         local_idx = global_idx - self.shard_starts[shard_idx]
-        
+        return shard_idx, local_idx
+
+    def _encode_image_to_visual_tokens(self, image_np: np.ndarray) -> torch.LongTensor:
+        """
+        Encode an image to visual token ids using only the vision tower.
+
+        image_np: H x W x 3, uint8
+        Returns: 1D tensor [T_vis] of visual token ids (already shifted by text vocab size).
+        """
+        if not isinstance(image_np, np.ndarray):
+            image_np = np.array(image_np)
+        pil_image = Image.fromarray(image_np.astype(np.uint8))
+
+        # Use the same processor as the vision tower
+        proc = self.vision_tower.image_processor(
+            images=pil_image,
+            return_tensors="pt",
+        )
+        pixel_values = proc["pixel_values"]  # [1, 3, H', W']
+
+        # Match the vision tower device and dtype
+        param = next(self.vision_tower.parameters())
+        device = param.device
+        dtype = param.dtype
+
+        pixel_values = pixel_values.to(device=device, dtype=dtype)
+
+        with torch.no_grad():
+            # Reuse vision tower forward
+            image_features, tokens = self.vision_tower(pixel_values, self.text_vocab_size)
+            # tokens: [1, P*P, L] already offset into [text_vocab_size, text_vocab_size + codebook_size)
+
+        # Flatten tokens to a 1D sequence
+        subgoal_token_ids = tokens[0].reshape(-1).cpu().long()  # [T_vis]
+
+        return subgoal_token_ids
+
+    def _tokenize_action(self, action_vec: np.ndarray) -> torch.LongTensor:
+        """
+        Convert continuous action vector to token ids.
+
+        Assumes self.action_tokenizer.encode_actions(action_vec) returns a 1D array
+        of token ids that are already valid LLM ids (for example mapped to <action_0>.. tokens).
+        """
+        action_ids = self.action_tokenizer.encode_actions(action_vec)  # shape [T_act] or [*, ...]
+        action_ids = np.asarray(action_ids).reshape(-1)
+        return torch.as_tensor(action_ids, dtype=torch.long)
+
+    def __getitem__(self, idx: int):
+        shard_idx, local_idx = self._get_shard_and_local_idx(idx)
         shard_path = self.shard_paths[shard_idx]
 
-        # 3. LOAD DATA (Lazy)
-        # Now we open just the specific shard we need
-        data = np.load(shard_path, mmap_mode='r')
-        
-        # Retrieve the specific row
-        curr_img_arr = data['curr_img'][local_idx]
-        future_img_arr = data['subgoal_img'][local_idx]
-        raw_action = data['action_vec'][local_idx]
-        
-        # Note: If instruction is duplicated 10k times in the shard, 
-        # it might be stored as one string or an array. Handle accordingly.
-        if data['instruction'].ndim == 0:
-            instruction = str(data['instruction'])
+        data = np.load(shard_path, mmap_mode="r", allow_pickle=True)
+
+        curr_img_np = data["curr_img"][local_idx]        # H x W x 3
+        subgoal_img_np = data["subgoal_img"][local_idx]  # H x W x 3
+        action_vec = np.array(data["action_vec"][local_idx], copy=True)
+
+        # Ensure uint8
+        curr_img_np = np.asarray(curr_img_np, dtype=np.uint8)
+        subgoal_img_np = np.asarray(subgoal_img_np, dtype=np.uint8)
+
+        # Instruction can be scalar (0D) or vector (1D)
+        instr_arr = np.array(data["instruction"][local_idx], copy=True)
+        if instr_arr.ndim == 0:
+            instruction = str(instr_arr.item())
         else:
-            instruction = str(data['instruction'][local_idx])
+            instruction = str(instr_arr[local_idx])
 
-        # ------------------------------------------------------------------
-        # 2. VISION ENCODER INPUT (SigLIP)
-        # ------------------------------------------------------------------
-        # Returns: {'pixel_values': tensor [1, 3, 336, 336]} (or 384 depending on config)
-        # image_tensor = self.image_processor.preprocess(curr_img_arr, return_tensors='pt')['pixel_values'][0]
-        img_tensor = process_image(curr_img_arr, self.data_args, None)
+        # 1. Process current image for input (VILA style)
+        curr_pil = Image.fromarray(curr_img_np)
+        curr_image_tensor = process_image(curr_pil, self.data_args, image_folder=None)
 
-        subgoal_img_tensor = process_image(future_img_arr, self.data_args, None)
-        # ------------------------------------------------------------------
-        # 3. SUBGOAL (Visual Tokens via RQ-VAE)
-        # ------------------------------------------------------------------
-        # RQ-VAE expects specific preprocessing (usually 256x256, [-1, 1])
-        vq_input = self._preprocess_numpy_for_rqvae(future_img_arr)
-        
-        with torch.no_grad():
-            # RQ-VAE encode usually returns indices of shape [B, H, W, D] or [B, D, H, W]
-            # VILA-U codebase likely has a wrapper that handles this.
-            # We assume .get_code_indices() or similar returns [B, H*W*D] or [B, H, W, D]
-            
-            # Example call (Pseudo-code, adapt to exact VILA-U method name):
-            # codes = self.rqvae_model.get_codes(vq_input.unsqueeze(0)) 
-            
-            # If using standard RQ-VAE:
-            codes = self.rqvae_model.encode(vq_input.unsqueeze(0)) # [B, Depth, H, W]
-            
-            # FLATTEN STRATEGY: (B, D, H, W) -> (B, H, W, D) -> (B, Sequence_Len)
-            # We want "Depth" to be the innermost dimension so the LLM predicts 
-            # the coarse token, then the fine tokens for that same patch, then moves to next patch.
-            codes = codes.permute(0, 2, 3, 1) # [B, H, W, D]
-            subgoal_indices = codes.reshape(-1).cpu() # Flatten to 1D sequence [H*W*D]
+        # 2. Build prompt:
+        #    <im_start><image><im_end>\n<instruction>
+        prompt_str = (
+            f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}\n"
+            f"{instruction}"
+        )
 
-        # ------------------------------------------------------------------
-        # 4. ACTION TOKENS
-        # ------------------------------------------------------------------
-        action_bins = self.action_tokenizer.encode_actions(raw_action)
-        action_token_strs = [f"<action_{b}>" for b in action_bins]
-        action_ids = [self.tokenizer.convert_tokens_to_ids(t) for t in action_token_strs]
-        action_ids = torch.tensor(action_ids, dtype=torch.long)
+        encoded = self.tokenizer(
+            prompt_str,
+            return_tensors="pt",
+            add_special_tokens=True,   # BOS etc
+            truncation=True,
+            max_length=self.tokenizer.model_max_length,
+        )
+        prompt_ids = encoded.input_ids[0]  # [T_prompt]
 
-        # ------------------------------------------------------------------
-        # 5. STITCH & MASK
-        # ------------------------------------------------------------------
-        prompt = f"{DEFAULT_IMAGE_TOKEN}\nUser: {instruction}\nAssistant: "
-        prompt_ids = self.tokenizer(prompt, return_tensors='pt', add_special_tokens=True).input_ids[0]
+        # 3. Encode subgoal image into visual token ids
+        subgoal_pil = Image.fromarray(subgoal_img_np)
+        subgoal_vis_ids = self._encode_image_to_visual_tokens(subgoal_pil)  # [T_vis]
 
-        input_ids = torch.cat([
-            prompt_ids,
-            subgoal_indices, # Now a long sequence of RQ tokens
-            torch.tensor([self.action_start_id]),
-            action_ids,
-            torch.tensor([self.action_end_id])
-        ])
+        # 4. Tokenize action into action token ids
+        action_ids = self._tokenize_action(action_vec)  # [T_act]
 
-        labels = input_ids.clone()
-        labels[:len(prompt_ids)] = IGNORE_INDEX
+        act_start = torch.tensor([self.act_start_id], dtype=torch.long)
+        act_end = torch.tensor([self.act_end_id], dtype=torch.long)
+
+        # 5. Final sequence
+        full_input_ids = torch.cat(
+            [prompt_ids, act_start, action_ids, act_end],
+            dim=0,
+        )
+
+        # 6. Labels: ignore prompt, supervise subgoal + action tokens
+        full_labels = full_input_ids.clone()
+        full_labels[: len(prompt_ids)] = IGNORE_INDEX
+
+        attention_mask = torch.ones_like(full_input_ids, dtype=torch.long)
+
+        # Ensure image is [C, H, W]
+        if curr_image_tensor.ndim == 3:
+            image_for_model = curr_image_tensor
+        elif curr_image_tensor.ndim == 4:
+            image_for_model = curr_image_tensor[0]
+        else:
+            raise ValueError(f"Unexpected image tensor shape: {curr_image_tensor.shape}")
 
         return {
-            "input_ids": input_ids,
-            "labels": labels,
-            "images": image_tensor
+            "input_ids": full_input_ids,
+            "labels": full_labels,
+            "attention_mask": attention_mask,
+            "image": image_for_model,
         }
 
-    def _preprocess_numpy_for_rqvae(self, img_arr):
-        """
-        RQ-VAE generally uses 256x256 resolution and [-1, 1] norm.
-        """
-        tensor = torch.from_numpy(img_arr).permute(2, 0, 1).float() 
-        
-        # Resize to 256x256 (RQ-VAE standard)
-        if tensor.shape[1] != 256 or tensor.shape[2] != 256:
-             tensor = torch.nn.functional.interpolate(
-                tensor.unsqueeze(0), size=(256, 256), mode='bilinear', align_corners=False
-            ).squeeze(0)
-            
-        # Normalize [-1, 1]
-        tensor = (tensor / 127.5) - 1.0
-        return tensor
 
 @dataclass
 class CoTVLADataCollator:
     tokenizer: transformers.PreTrainedTokenizer
+    data_args: object  # DataArguments, used only for dummy image size if needed
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        """
-        instances: A list of the dictionaries returned by __getitem__
-                   [{'input_ids': ..., 'labels': ..., 'images': ...}, ...]
-        """
-        # 1. Extract the parts
-        input_ids_list = [instance['input_ids'] for instance in instances]
-        labels_list = [instance['labels'] for instance in instances]
-        images_list = [instance['images'] for instance in instances]
+        # 1. Extract fields from dataset samples
+        input_ids_list = [inst["input_ids"] for inst in instances]
+        labels_list    = [inst["labels"] for inst in instances]
+        images_list    = [inst.get("image", None) for inst in instances]
 
-        # 2. Pad Input IDs (Right Padding)
-        # We pad with the tokenizer's pad_token_id
+        # 2. Pad input_ids with pad_token_id
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids_list,
             batch_first=True,
-            padding_value=self.tokenizer.pad_token_id
+            padding_value=self.tokenizer.pad_token_id,
         )
 
-        # 3. Pad Labels
-        # We pad with IGNORE_INDEX (-100) so the model doesn't calculate loss on the padding
+        # 3. Pad labels with IGNORE_INDEX
         labels = torch.nn.utils.rnn.pad_sequence(
             labels_list,
             batch_first=True,
-            padding_value=IGNORE_INDEX
+            padding_value=IGNORE_INDEX,
         )
 
-        # 4. Stack Images
-        # Since all images are resized to 384x384 (or 336) by SigLIP, 
-        # we can just stack them directly.
-        images = torch.stack(images_list, dim=0)
-
-        # 5. Handle Attention Mask (Optional but Recommended)
-        # 1 = Real Token, 0 = Padding
-        # This tells the model "don't pay attention to the empty padding at the end"
+        # 4. Attention mask: 1 where not pad, 0 where pad
         attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
 
-        return {
-            'input_ids': input_ids,
-            'labels': labels,
-            'images': images,
-            'attention_mask': attention_mask
+        # 5. Stack images into [B, C, H, W]
+        valid_images = [img for img in images_list if img is not None]
+
+        if len(valid_images) > 0:
+            processed = []
+            for img in valid_images:
+                # Allow [3,H,W] or [1,3,H,W]
+                if img.ndim == 4 and img.size(0) == 1:
+                    img = img[0]
+                elif img.ndim != 3:
+                    raise ValueError(f"Unexpected image shape in collator: {img.shape}")
+                processed.append(img)
+            images = torch.stack(processed, dim=0)
+        else:
+            # No images in this batch: create dummy zero image like original
+            if hasattr(self.data_args.image_processor, "crop_size"):
+                crop_size = self.data_args.image_processor.crop_size
+            else:
+                crop_size = self.data_args.image_processor.size
+            images = torch.zeros(
+                1,
+                3,
+                crop_size["height"],
+                crop_size["width"],
+                dtype=torch.float32,
+            )
+
+        batch = {
+            "input_ids": input_ids,
+            "labels": labels,
+            "attention_mask": attention_mask,
+            "images": images,
         }
+
+        return batch
 
 class LazySupervisedDataset(Dataset):
     def __init__(

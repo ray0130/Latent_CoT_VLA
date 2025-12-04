@@ -164,21 +164,21 @@ def unfreeze_last_n_llm_layers(model, last_n=2, unfreeze_lm_head=True):
 
 def make_vila_trainable_subset(model, last_n_llm_layers=0):
     # 1. Freeze everything in the LLM
-    freeze_all_llm_layers(model)
-
+    # freeze_all_llm_layers(model)
+    print(f"Unfreezing last {last_n_llm_layers} Layers")
     # 2. Optionally unfreeze a few top LLM layers
     if last_n_llm_layers > 0:
         unfreeze_last_n_llm_layers(model, last_n=last_n_llm_layers)
 
     # 3. Keep vision tower frozen
-    vt = model.get_vision_tower()
-    for p in vt.parameters():
-        p.requires_grad = False
+    # vt = model.get_vision_tower()
+    # for p in vt.parameters():
+    #     p.requires_grad = False
 
-    # 4. Train only mm projector (and maybe other small heads)
-    mm_proj = model.get_mm_projector()
-    for p in mm_proj.parameters():
-        p.requires_grad = True
+    # # 4. Train only mm projector (and maybe other small heads)
+    # mm_proj = model.get_mm_projector()
+    # for p in mm_proj.parameters():
+    #     p.requires_grad = True
 
     # You can print stats to confirm
     total = sum(p.numel() for p in model.parameters())
@@ -400,7 +400,6 @@ def train():
     print(f"Trainable params: {trainable / 1e6:.1f}M / {total / 1e6:.1f}M")
 
     n = 4
-    print(f"Freezing Last {n} Layers of LLM")
     make_vila_trainable_subset(trainer.model, last_n_llm_layers=n)
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

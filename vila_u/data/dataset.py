@@ -200,16 +200,18 @@ class ShardedCoTVLADataset(Dataset):
     CoT VLA dataset for VILA U.
 
     Per example:
-      - current image (input)
-      - subgoal image (input)
-      - text instruction
-      - continuous action vector
+      - curr_img:    input image
+      - subgoal_img: target subgoal image (to be generated)
+      - instruction: text instruction
+      - action_vec:  continuous actions
 
-    Text prompt format:
-      <im_start><image><im_end>\n<instruction>\n<im_start><image><im_end>
+    Conversation:
 
-    The model will see 2 IMAGE_TOKEN_INDEX placeholders in input_ids and
-    2 images in batch["images"]. VILA-U will associate them in order.
+      human:  <image>\n<instruction>
+              (image is curr_img)
+
+      gpt:    <image>\n
+              (image is subgoal_img, then we append action tokens at the token level)
     """
 
     def __init__(
@@ -229,11 +231,9 @@ class ShardedCoTVLADataset(Dataset):
         self.data_args = data_args
         self.action_tokenizer = action_tokenizer
 
-        # These tokens are already added in train() via smart_tokenizer_and_embedding_resize
         self.act_start_id = tokenizer.convert_tokens_to_ids(act_start_token)
         self.act_end_id = tokenizer.convert_tokens_to_ids(act_end_token)
 
-        # Sanity checks
         assert self.act_start_id != tokenizer.unk_token_id, (
             f"{act_start_token} is not in tokenizer vocab. "
             "Make sure you added it before constructing the dataset."
@@ -243,18 +243,14 @@ class ShardedCoTVLADataset(Dataset):
             "Make sure you added it before constructing the dataset."
         )
 
-        # Discover shards
         shard_paths: List[str] = []
         for fname in sorted(os.listdir(data_dir)):
             if fname.endswith(shard_suffix):
                 shard_paths.append(os.path.join(data_dir, fname))
-
         if not shard_paths:
             raise ValueError(f"No shards with suffix {shard_suffix} found in {data_dir}")
-
         self.shard_paths = shard_paths
 
-        # Precompute prefix sums of shard sizes for global indexing
         shard_sizes = []
         for path in self.shard_paths:
             with np.load(path, mmap_mode="r") as data:
@@ -271,13 +267,7 @@ class ShardedCoTVLADataset(Dataset):
         return shard_idx, local_idx
 
     def _tokenize_action(self, action_vec: np.ndarray) -> torch.LongTensor:
-        """
-        Convert continuous action vector to token ids.
-
-        Assumes self.action_tokenizer.encode_actions(action_vec) returns a 1D array
-        of token ids that are already valid LLM ids (for example mapped to <action_0>.. tokens).
-        """
-        action_ids = self.action_tokenizer.encode_actions(action_vec)  # shape [T_act] or [*, ...]
+        action_ids = self.action_tokenizer.encode_actions(action_vec)
         action_ids = np.asarray(action_ids).reshape(-1)
         return torch.as_tensor(action_ids, dtype=torch.long)
 
@@ -287,84 +277,80 @@ class ShardedCoTVLADataset(Dataset):
 
         data = np.load(shard_path, mmap_mode="r", allow_pickle=True)
 
-        curr_img_np = data["curr_img"][local_idx]        # H x W x 3
-        subgoal_img_np = data["subgoal_img"][local_idx]  # H x W x 3
-        action_vec = np.array(data["action_vec"][local_idx], copy=True)
+        curr_img_np    = data["curr_img"][local_idx]       # H, W, 3
+        subgoal_img_np = data["subgoal_img"][local_idx]    # H, W, 3
+        action_vec     = np.array(data["action_vec"][local_idx], copy=True)
 
-        # Ensure uint8 for images
-        curr_img_np = np.asarray(curr_img_np, dtype=np.uint8)
+        curr_img_np    = np.asarray(curr_img_np,    dtype=np.uint8)
         subgoal_img_np = np.asarray(subgoal_img_np, dtype=np.uint8)
 
-        # Instruction can be scalar (0D) or vector (1D)
         instr_arr = np.array(data["instruction"][local_idx], copy=True)
         if instr_arr.ndim == 0:
             instruction = str(instr_arr.item())
         else:
             instruction = str(instr_arr[local_idx])
 
-        # 1. Process both images (VILA style) - they will go into the "images" field
-        curr_pil = Image.fromarray(curr_img_np)
+        # 1. Process both images
+        curr_pil    = Image.fromarray(curr_img_np)
         subgoal_pil = Image.fromarray(subgoal_img_np)
 
-        curr_image_tensor = process_image(curr_pil, self.data_args, image_folder=None)
-        subgoal_image_tensor = process_image(subgoal_pil, self.data_args, image_folder=None)
+        curr_image_tensor = process_image(curr_pil,    self.data_args, image_folder=None)
+        subgoal_image_tensor = process_image(subgoal_pil, self.data_args, image_folder=None, generation_mode=True)
 
-        # Ensure each is [1, 3, H, W]
-        if curr_image_tensor.ndim == 3:
-            curr_image_tensor = curr_image_tensor.unsqueeze(0)
-        elif curr_image_tensor.ndim != 4:
+        # Normalize to [3, H, W]
+        if curr_image_tensor.ndim == 4 and curr_image_tensor.size(0) == 1:
+            curr_image_tensor = curr_image_tensor[0]
+        elif curr_image_tensor.ndim != 3:
             raise ValueError(f"Unexpected current image tensor shape: {curr_image_tensor.shape}")
 
-        if subgoal_image_tensor.ndim == 3:
-            subgoal_image_tensor = subgoal_image_tensor.unsqueeze(0)
-        elif subgoal_image_tensor.ndim != 4:
+        if subgoal_image_tensor.ndim == 4 and subgoal_image_tensor.size(0) == 1:
+            subgoal_image_tensor = subgoal_image_tensor[0]
+        elif subgoal_image_tensor.ndim != 3:
             raise ValueError(f"Unexpected subgoal image tensor shape: {subgoal_image_tensor.shape}")
 
-        # Concatenate so this example has 2 images: [2, 3, H, W]
-        image_for_model = torch.cat([curr_image_tensor, subgoal_image_tensor], dim=0)
+        # This sample has 2 images: [2, 3, H, W]
+        image_for_model = torch.stack([curr_image_tensor, subgoal_image_tensor], dim=0)
 
-        # 2. Build prompt:
-        #    <im_start><image><im_end>\n<instruction>\n<im_start><image><im_end>
-        prompt_str = (
-            f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}\n"
-            f"{instruction}\n"
-            f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}"
+        # 2. Build conversation:
+        #    human: <image>\ninstruction
+        #    gpt:   <image>\n
+        human_value = f"{DEFAULT_IMAGE_TOKEN}\n{instruction}"
+        gpt_value   = f"{DEFAULT_IMAGE_TOKEN}\n"
+
+        conversation = [
+            {"from": "human", "value": human_value},
+            {"from": "gpt",   "value": gpt_value},
+        ]
+        sources = [conversation]
+
+        # Use VILA's multimodal preprocessing
+        sources = preprocess_multimodal(copy.deepcopy(sources), self.data_args)
+        data_dict = preprocess(
+            sources,
+            self.tokenizer,
+            has_image=True,
+            no_system_prompt=getattr(self.data_args, "no_system_prompt", False),
         )
 
-        encoded = self.tokenizer(
-            prompt_str,
-            return_tensors="pt",
-            add_special_tokens=True,   # BOS etc
-            truncation=True,
-            max_length=self.tokenizer.model_max_length,
-        )
-        prompt_ids = encoded.input_ids[0]  # [T_prompt]
+        input_ids_base = torch.tensor(data_dict["input_ids"][0], dtype=torch.long)
+        labels_base    = torch.tensor(data_dict["labels"][0],    dtype=torch.long)
 
-        # 3. Tokenize action into action token ids
-        action_ids = self._tokenize_action(action_vec)  # [T_act]
+        # 3. Append actions on the assistant side
+        action_ids = self._tokenize_action(action_vec)
+        act_start  = torch.tensor([self.act_start_id], dtype=torch.long)
+        act_end    = torch.tensor([self.act_end_id],   dtype=torch.long)
 
-        act_start = torch.tensor([self.act_start_id], dtype=torch.long)
-        act_end = torch.tensor([self.act_end_id], dtype=torch.long)
+        action_seq = torch.cat([act_start, action_ids, act_end], dim=0)
 
-        # 4. Final sequence: [prompt] <action_start> [action_ids] <action_end>
-        full_input_ids = torch.cat(
-            [prompt_ids, act_start, action_ids, act_end],
-            dim=0,
-        )
-
-        # 5. Labels: ignore all prompt tokens, supervise only the action tokens
-        full_labels = full_input_ids.clone()
-        full_labels[: len(prompt_ids)-3] = IGNORE_INDEX  # I do len(prompt_ids)-3 so the subgoal image doens't get deleted
-
-        attention_mask = torch.ones_like(full_input_ids, dtype=torch.long)
+        full_input_ids = torch.cat([input_ids_base, action_seq], dim=0)
+        full_labels    = torch.cat([labels_base,    action_seq.clone()], dim=0)
 
         return {
             "input_ids": full_input_ids,
             "labels": full_labels,
-            "attention_mask": attention_mask,
-            # shape [2, 3, H, W]; collator will stack to [B, 2, 3, H, W]
-            "image": image_for_model,
+            "image": image_for_model,  # [2, 3, H, W]
         }
+
 
 
 
@@ -375,57 +361,52 @@ class CoTVLADataCollator:
     data_args: object  # DataArguments, used only for dummy image size if needed
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        # 1. Extract fields from dataset samples
         input_ids_list = [inst["input_ids"] for inst in instances]
         labels_list    = [inst["labels"] for inst in instances]
         images_list    = [inst.get("image", None) for inst in instances]
 
-        # 2. Pad input_ids with pad_token_id
+        # 1. Pad input_ids
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids_list,
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         )
 
-        # 3. Pad labels with IGNORE_INDEX
+        # 2. Pad labels
         labels = torch.nn.utils.rnn.pad_sequence(
             labels_list,
             batch_first=True,
             padding_value=IGNORE_INDEX,
         )
 
-        # 4. Attention mask: 1 where not pad, 0 where pad
+        # 3. Attention mask
         attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
 
-        # 5. Stack images
-        # Each per-example "image" is:
-        #   - [2, 3, H, W] for (curr, subgoal), or
-        #   - optionally [1, 3, H, W] or [3, H, W] if you use variants later
+        # 4. Stack images into [B, 2, 3, H, W]
         valid_images = [img for img in images_list if img is not None]
 
         if len(valid_images) > 0:
             processed = []
             for img in valid_images:
+                # Allowed shapes:
+                #   [3, H, W]        -> single image
+                #   [N, 3, H, W]     -> N images (we expect N == 2 here)
                 if img.ndim == 3:
-                    # [3, H, W] -> [1, 3, H, W]
-                    img = img.unsqueeze(0)
+                    img = img.unsqueeze(0)   # [1, 3, H, W]
                 elif img.ndim == 4:
-                    # expected [N, 3, H, W] with N >= 1
-                    pass
+                    pass                    # [N, 3, H, W]
                 else:
                     raise ValueError(f"Unexpected image shape in collator: {img.shape}")
                 processed.append(img)
 
-            # Result: [B, N, 3, H, W], with N = 2 in your current dataset
-            images = torch.stack(processed, dim=0)
+            # Now processed is a list of [N,3,H,W], all with same N (2)
+            images = torch.stack(processed, dim=0)   # [B, N, 3, H, W]
         else:
-            # No images in this batch: create dummy zero image like original
+            # Fallback dummy image
             if hasattr(self.data_args.image_processor, "crop_size"):
                 crop_size = self.data_args.image_processor.crop_size
             else:
                 crop_size = self.data_args.image_processor.size
-
-            # Dummy with a single image slot N=1
             images = torch.zeros(
                 1,
                 1,
@@ -439,11 +420,11 @@ class CoTVLADataCollator:
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": attention_mask,
-            # images: [B, N, 3, H, W]
             "images": images,
         }
 
         return batch
+
 
 
 class LazySupervisedDataset(Dataset):

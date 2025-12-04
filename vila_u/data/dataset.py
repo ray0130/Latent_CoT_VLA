@@ -29,7 +29,7 @@ from vila_u.data.simple_vila_webdataset import VILAWebDataset
 from vila_u.mm_utils import tokenizer_image_token, opencv_extract_frames, process_image
 from vila_u.train.args import DataArguments, TrainingArguments
 
-from vila_u.model.multimodal_encoder.rqvaesigliptransformer_encoder import RQVAESIGLIPTransformerVisionTower
+# from vila_u.model.multimodal_encoder.rqvaesigliptransformer_encoder import RQVAESIGLIPTransformerVisionTower
 
 
 import glob
@@ -199,14 +199,17 @@ class ShardedCoTVLADataset(Dataset):
     """
     CoT VLA dataset for VILA U.
 
-    Input per example:
-      - current image (as VILA style "image")
-      - text instruction, with DEFAULT_IMAGE_TOKEN indicating where the image is referenced
+    Per example:
+      - current image (input)
+      - subgoal image (input)
+      - text instruction
+      - continuous action vector
 
-    Output token sequence:
-      [prompt tokens]
-      [subgoal visual tokens]
-      <action_start>  [action tokens]  <action_end>
+    Text prompt format:
+      <im_start><image><im_end>\n<instruction>\n<im_start><image><im_end>
+
+    The model will see 2 IMAGE_TOKEN_INDEX placeholders in input_ids and
+    2 images in batch["images"]. VILA-U will associate them in order.
     """
 
     def __init__(
@@ -214,7 +217,6 @@ class ShardedCoTVLADataset(Dataset):
         data_dir: str,
         tokenizer: transformers.PreTrainedTokenizer,
         data_args,
-        vision_tower: RQVAESIGLIPTransformerVisionTower,
         action_tokenizer,
         act_start_token: str = "<action_start>",
         act_end_token: str = "<action_end>",
@@ -225,14 +227,13 @@ class ShardedCoTVLADataset(Dataset):
         self.data_dir = data_dir
         self.tokenizer = tokenizer
         self.data_args = data_args
-        self.vision_tower = vision_tower
         self.action_tokenizer = action_tokenizer
 
         # These tokens are already added in train() via smart_tokenizer_and_embedding_resize
         self.act_start_id = tokenizer.convert_tokens_to_ids(act_start_token)
         self.act_end_id = tokenizer.convert_tokens_to_ids(act_end_token)
 
-        # Sanity checks: if either token is unknown, something is wrong with the train-time injection
+        # Sanity checks
         assert self.act_start_id != tokenizer.unk_token_id, (
             f"{act_start_token} is not in tokenizer vocab. "
             "Make sure you added it before constructing the dataset."
@@ -241,9 +242,6 @@ class ShardedCoTVLADataset(Dataset):
             f"{act_end_token} is not in tokenizer vocab. "
             "Make sure you added it before constructing the dataset."
         )
-
-        # Use the final vocab size (after action tokens) for visual token offset
-        self.text_vocab_size = tokenizer.vocab_size
 
         # Discover shards
         shard_paths: List[str] = []
@@ -272,41 +270,6 @@ class ShardedCoTVLADataset(Dataset):
         local_idx = global_idx - self.shard_starts[shard_idx]
         return shard_idx, local_idx
 
-    def _encode_image_to_visual_tokens(self, image_np: np.ndarray) -> torch.LongTensor:
-        """
-        Encode an image to visual token ids using only the vision tower.
-
-        image_np: H x W x 3, uint8
-        Returns: 1D tensor [T_vis] of visual token ids (already shifted by text vocab size).
-        """
-        if not isinstance(image_np, np.ndarray):
-            image_np = np.array(image_np)
-        pil_image = Image.fromarray(image_np.astype(np.uint8))
-
-        # Use the same processor as the vision tower
-        proc = self.vision_tower.image_processor(
-            images=pil_image,
-            return_tensors="pt",
-        )
-        pixel_values = proc["pixel_values"]  # [1, 3, H', W']
-
-        # Match the vision tower device and dtype
-        param = next(self.vision_tower.parameters())
-        device = param.device
-        dtype = param.dtype
-
-        pixel_values = pixel_values.to(device=device, dtype=dtype)
-
-        with torch.no_grad():
-            # Reuse vision tower forward
-            image_features, tokens = self.vision_tower(pixel_values, self.text_vocab_size)
-            # tokens: [1, P*P, L] already offset into [text_vocab_size, text_vocab_size + codebook_size)
-
-        # Flatten tokens to a 1D sequence
-        subgoal_token_ids = tokens[0].reshape(-1).cpu().long()  # [T_vis]
-
-        return subgoal_token_ids
-
     def _tokenize_action(self, action_vec: np.ndarray) -> torch.LongTensor:
         """
         Convert continuous action vector to token ids.
@@ -328,7 +291,7 @@ class ShardedCoTVLADataset(Dataset):
         subgoal_img_np = data["subgoal_img"][local_idx]  # H x W x 3
         action_vec = np.array(data["action_vec"][local_idx], copy=True)
 
-        # Ensure uint8
+        # Ensure uint8 for images
         curr_img_np = np.asarray(curr_img_np, dtype=np.uint8)
         subgoal_img_np = np.asarray(subgoal_img_np, dtype=np.uint8)
 
@@ -339,15 +302,33 @@ class ShardedCoTVLADataset(Dataset):
         else:
             instruction = str(instr_arr[local_idx])
 
-        # 1. Process current image for input (VILA style)
+        # 1. Process both images (VILA style) - they will go into the "images" field
         curr_pil = Image.fromarray(curr_img_np)
+        subgoal_pil = Image.fromarray(subgoal_img_np)
+
         curr_image_tensor = process_image(curr_pil, self.data_args, image_folder=None)
+        subgoal_image_tensor = process_image(subgoal_pil, self.data_args, image_folder=None)
+
+        # Ensure each is [1, 3, H, W]
+        if curr_image_tensor.ndim == 3:
+            curr_image_tensor = curr_image_tensor.unsqueeze(0)
+        elif curr_image_tensor.ndim != 4:
+            raise ValueError(f"Unexpected current image tensor shape: {curr_image_tensor.shape}")
+
+        if subgoal_image_tensor.ndim == 3:
+            subgoal_image_tensor = subgoal_image_tensor.unsqueeze(0)
+        elif subgoal_image_tensor.ndim != 4:
+            raise ValueError(f"Unexpected subgoal image tensor shape: {subgoal_image_tensor.shape}")
+
+        # Concatenate so this example has 2 images: [2, 3, H, W]
+        image_for_model = torch.cat([curr_image_tensor, subgoal_image_tensor], dim=0)
 
         # 2. Build prompt:
-        #    <im_start><image><im_end>\n<instruction>
+        #    <im_start><image><im_end>\n<instruction>\n<im_start><image><im_end>
         prompt_str = (
             f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}\n"
-            f"{instruction}"
+            f"{instruction}\n"
+            f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}"
         )
 
         encoded = self.tokenizer(
@@ -359,42 +340,33 @@ class ShardedCoTVLADataset(Dataset):
         )
         prompt_ids = encoded.input_ids[0]  # [T_prompt]
 
-        # 3. Encode subgoal image into visual token ids
-        subgoal_pil = Image.fromarray(subgoal_img_np)
-        subgoal_vis_ids = self._encode_image_to_visual_tokens(subgoal_pil)  # [T_vis]
-
-        # 4. Tokenize action into action token ids
+        # 3. Tokenize action into action token ids
         action_ids = self._tokenize_action(action_vec)  # [T_act]
 
         act_start = torch.tensor([self.act_start_id], dtype=torch.long)
         act_end = torch.tensor([self.act_end_id], dtype=torch.long)
 
-        # 5. Final sequence
+        # 4. Final sequence: [prompt] <action_start> [action_ids] <action_end>
         full_input_ids = torch.cat(
             [prompt_ids, act_start, action_ids, act_end],
             dim=0,
         )
 
-        # 6. Labels: ignore prompt, supervise subgoal + action tokens
+        # 5. Labels: ignore all prompt tokens, supervise only the action tokens
         full_labels = full_input_ids.clone()
-        full_labels[: len(prompt_ids)] = IGNORE_INDEX
+        full_labels[: len(prompt_ids)-3] = IGNORE_INDEX  # I do len(prompt_ids)-3 so the subgoal image doens't get deleted
 
         attention_mask = torch.ones_like(full_input_ids, dtype=torch.long)
-
-        # Ensure image is [C, H, W]
-        if curr_image_tensor.ndim == 3:
-            image_for_model = curr_image_tensor
-        elif curr_image_tensor.ndim == 4:
-            image_for_model = curr_image_tensor[0]
-        else:
-            raise ValueError(f"Unexpected image tensor shape: {curr_image_tensor.shape}")
 
         return {
             "input_ids": full_input_ids,
             "labels": full_labels,
             "attention_mask": attention_mask,
+            # shape [2, 3, H, W]; collator will stack to [B, 2, 3, H, W]
             "image": image_for_model,
         }
+
+
 
 
 @dataclass
@@ -425,18 +397,26 @@ class CoTVLADataCollator:
         # 4. Attention mask: 1 where not pad, 0 where pad
         attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
 
-        # 5. Stack images into [B, C, H, W]
+        # 5. Stack images
+        # Each per-example "image" is:
+        #   - [2, 3, H, W] for (curr, subgoal), or
+        #   - optionally [1, 3, H, W] or [3, H, W] if you use variants later
         valid_images = [img for img in images_list if img is not None]
 
         if len(valid_images) > 0:
             processed = []
             for img in valid_images:
-                # Allow [3,H,W] or [1,3,H,W]
-                if img.ndim == 4 and img.size(0) == 1:
-                    img = img[0]
-                elif img.ndim != 3:
+                if img.ndim == 3:
+                    # [3, H, W] -> [1, 3, H, W]
+                    img = img.unsqueeze(0)
+                elif img.ndim == 4:
+                    # expected [N, 3, H, W] with N >= 1
+                    pass
+                else:
                     raise ValueError(f"Unexpected image shape in collator: {img.shape}")
                 processed.append(img)
+
+            # Result: [B, N, 3, H, W], with N = 2 in your current dataset
             images = torch.stack(processed, dim=0)
         else:
             # No images in this batch: create dummy zero image like original
@@ -444,7 +424,10 @@ class CoTVLADataCollator:
                 crop_size = self.data_args.image_processor.crop_size
             else:
                 crop_size = self.data_args.image_processor.size
+
+            # Dummy with a single image slot N=1
             images = torch.zeros(
+                1,
                 1,
                 3,
                 crop_size["height"],
@@ -456,10 +439,12 @@ class CoTVLADataCollator:
             "input_ids": input_ids,
             "labels": labels,
             "attention_mask": attention_mask,
+            # images: [B, N, 3, H, W]
             "images": images,
         }
 
         return batch
+
 
 class LazySupervisedDataset(Dataset):
     def __init__(

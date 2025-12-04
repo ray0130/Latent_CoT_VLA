@@ -140,6 +140,55 @@ def smart_tokenizer_and_embedding_resize(
         input_embeddings[-num_new_tokens:] = input_embeddings_avg
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
 
+##############
+# Code to Freeze part of LM
+##############
+def freeze_all_llm_layers(model):
+    # model.llm is the underlying LLaMA in VILA U
+    for p in model.llm.parameters():
+        p.requires_grad = False
+
+def unfreeze_last_n_llm_layers(model, last_n=2, unfreeze_lm_head=True):
+    # Inspect once in a Python shell if needed: print(model.llm)
+    # In LLaMA this is usually model.llm.model.layers
+    transformer = model.llm.model
+    layers = transformer.layers  # this is a list or ModuleList
+
+    for layer in layers[-last_n:]:
+        for p in layer.parameters():
+            p.requires_grad = True
+
+    if unfreeze_lm_head and hasattr(model.llm, "lm_head"):
+        for p in model.llm.lm_head.parameters():
+            p.requires_grad = True
+
+def make_vila_trainable_subset(model, last_n_llm_layers=0):
+    # 1. Freeze everything in the LLM
+    freeze_all_llm_layers(model)
+
+    # 2. Optionally unfreeze a few top LLM layers
+    if last_n_llm_layers > 0:
+        unfreeze_last_n_llm_layers(model, last_n=last_n_llm_layers)
+
+    # 3. Keep vision tower frozen
+    vt = model.get_vision_tower()
+    for p in vt.parameters():
+        p.requires_grad = False
+
+    # 4. Train only mm projector (and maybe other small heads)
+    mm_proj = model.get_mm_projector()
+    for p in mm_proj.parameters():
+        p.requires_grad = True
+
+    # You can print stats to confirm
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Trainable params: {trainable / 1e6:.1f}M out of {total / 1e6:.1f}M")
+
+    return model
+##############
+# Code END to Freeze part of LM
+##############
 
 def train():
     global local_rank
@@ -322,6 +371,9 @@ def train():
     # ==========================================================================
     print("After Making COTVLA Data Module")
 
+    print("============ Training Arguments =============")
+    print(training_args)
+
     callbacks = [AutoResumeCallback()]
     trainer = VILAUTrainer(
         model=model,
@@ -342,6 +394,14 @@ def train():
         torch.cuda.memory_allocated() / 1024 / 1024 / 1024,
         flush=True,
     )
+
+    trainable = sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in trainer.model.parameters())
+    print(f"Trainable params: {trainable / 1e6:.1f}M / {total / 1e6:.1f}M")
+
+    n = 4
+    print(f"Freezing Last {n} Layers of LLM")
+    make_vila_trainable_subset(trainer.model, last_n_llm_layers=n)
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.save_state()

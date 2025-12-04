@@ -71,7 +71,23 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
             revision=revision,
             use_safetensors=use_safetensors,
             **kwargs,
-        )    
+        )  
+
+    def save_checkpoint(self, save_dir, **kwargs):
+        """
+        Adapter for HF Trainer + Deepspeed.
+
+        When Trainer with deepspeed calls model_wrapped.save_checkpoint(save_dir),
+        we just reuse the normal VILA U save_pretrained logic that already saves
+        llm, vision_tower, and mm_projector into subfolders.
+        """
+        print("Saving checkpoint HF function: ")
+        print(f"Saving to: {save_dir}")
+        os.makedirs(save_dir, exist_ok=True)
+
+        # If there is a custom save_pretrained on VILAUMetaModel, this will run it.
+        # Otherwise fallback to the standard PreTrainedModel.save_pretrained.
+        self.save_pretrained(save_dir)
 
     def forward(
         self,
@@ -87,6 +103,8 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        # print("Initial Input IDS: ", input_ids.shape, input_ids.min(), input_ids.max())
+        # print(input_ids[0])
         if inputs_embeds is None:
             (
                 input_ids,
@@ -103,7 +121,9 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
                 labels,
                 images,
             )
-            
+        
+        # print("Input IDS before repack multimodal data: ")
+        # print(input_ids)
         if self.training:
             (
                 _,
@@ -131,6 +151,10 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
             sorted_seqlens_in_batch = attention_mask.sum(-1).int()
             new_input_ids = input_ids
 
+        # print("After repack, New Input embeds: ", new_inputs_embeds.shape, new_inputs_embeds.min(), new_inputs_embeds.max())
+        # print(new_inputs_embeds)
+        # print("After repack, New Input IDS: ")
+        # print(new_input_ids)
         output_attentions = output_attentions if output_attentions is not None else self.llm.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.llm.config.output_hidden_states

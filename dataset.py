@@ -12,15 +12,15 @@ from tqdm import tqdm
 
 
 DATASET_NAME = "fractal20220817_data"
-SPLIT = "train[:100]"
-N_SUBGOAL = 5 # curr: steps[t], subgoal: steps[t+N_SUBGOAL]
-M_ACTION = 5 # action chunk: steps[t:t+M_ACTION]; shape (M_ACTION, 7)
-MAX_EPISODES = 20 # or set to small int while debugging
-SHARD_SIZE = 50 # how many samples per saved shard
+SPLIT = "train"
+N_SUBGOAL = 32 # curr: steps[t], subgoal: steps[t+N_SUBGOAL]
+M_ACTION = 32 # action chunk: steps[t:t+M_ACTION]; shape (M_ACTION, 7)
+MAX_EPISODES = 20000 # or set to small int while debugging
+SHARD_SIZE = 100 # how many samples per saved shard
 
-OUTPUT_DIR = "./test_data/rt1_100/train"
+OUTPUT_DIR = "./data/rt1_100ss_20keps/train"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-ACTION_BIN_EDGES_PATH = "./test_data/action_bin_edges.npy" # Path for bin edges for action discretization. shape (7, 257)
+ACTION_BIN_EDGES_PATH = "./data/action_bin_edges.npy" # Path for bin edges for action discretization. shape (7, 257)
 
 
 # [from Open_X_Embodiment_Datasets.ipynb]
@@ -163,7 +163,7 @@ def build_trajectories():
         for t in range(T):
             if t + N_SUBGOAL > T-1: # curr: steps[t], subgoal: steps[t+N_SUBGOAL]
                 break
-            if t + M_ACTION > T: # action chunk: steps[t:t+M_ACTION]
+            if t + M_ACTION > T-1: # action chunk: steps[t:t+M_ACTION]
                 break
 
             curr_step = steps[t]
@@ -196,7 +196,9 @@ def build_trajectories():
 
             # Flush if shard full
             if len(buffer["instruction"]) >= SHARD_SIZE:
+                print("flushing shard")
                 flush_buffer()
+                print("finished: flushing shard")
 
     # Final flush
     flush_buffer()

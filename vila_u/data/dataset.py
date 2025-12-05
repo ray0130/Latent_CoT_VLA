@@ -31,7 +31,7 @@ from vila_u.train.args import DataArguments, TrainingArguments
 
 # from vila_u.model.multimodal_encoder.rqvaesigliptransformer_encoder import RQVAESIGLIPTransformerVisionTower
 
-
+from tqdm import tqdm
 import glob
 import bisect
 
@@ -223,6 +223,7 @@ class ShardedCoTVLADataset(Dataset):
         act_start_token: str = "<action_start>",
         act_end_token: str = "<action_end>",
         shard_suffix: str = ".npz",
+        shard_size: int = 50,     # <--- NEW: all shards assumed to have fixed size
     ) -> None:
         super().__init__()
 
@@ -230,40 +231,48 @@ class ShardedCoTVLADataset(Dataset):
         self.tokenizer = tokenizer
         self.data_args = data_args
         self.action_tokenizer = action_tokenizer
+        self.shard_size = shard_size
 
+        # Action token sanity check
         self.act_start_id = tokenizer.convert_tokens_to_ids(act_start_token)
-        self.act_end_id = tokenizer.convert_tokens_to_ids(act_end_token)
+        self.act_end_id   = tokenizer.convert_tokens_to_ids(act_end_token)
 
         assert self.act_start_id != tokenizer.unk_token_id, (
-            f"{act_start_token} is not in tokenizer vocab. "
-            "Make sure you added it before constructing the dataset."
+            f"{act_start_token} not found in tokenizer vocabulary."
         )
         assert self.act_end_id != tokenizer.unk_token_id, (
-            f"{act_end_token} is not in tokenizer vocab. "
-            "Make sure you added it before constructing the dataset."
+            f"{act_end_token} not found in tokenizer vocabulary."
         )
 
+        # Find shards
         shard_paths: List[str] = []
         for fname in sorted(os.listdir(data_dir)):
             if fname.endswith(shard_suffix):
                 shard_paths.append(os.path.join(data_dir, fname))
+
         if not shard_paths:
-            raise ValueError(f"No shards with suffix {shard_suffix} found in {data_dir}")
+            raise ValueError(f"No .npz shards found in {data_dir}")
+
         self.shard_paths = shard_paths
+        self.num_shards = len(shard_paths)
 
-        shard_sizes = []
-        for path in self.shard_paths:
-            with np.load(path, mmap_mode="r") as data:
-                shard_sizes.append(data["curr_img"].shape[0])
-        self.shard_starts = np.cumsum([0] + shard_sizes)
-        self._len = self.shard_starts[-1]
+        # Global dataset length = num_shards * shard_size
+        self._len = self.num_shards * self.shard_size
 
-    def __len__(self) -> int:
+        print(f"Found {self.num_shards} shards; total dataset size = {self._len}")
+
+    def __len__(self):
         return self._len
 
     def _get_shard_and_local_idx(self, global_idx: int):
-        shard_idx = int(np.searchsorted(self.shard_starts, global_idx, side="right") - 1)
-        local_idx = global_idx - self.shard_starts[shard_idx]
+        """
+        Simple fixed-size shard indexing:
+          shard_idx = global_idx // shard_size
+          local_idx = global_idx % shard_size
+        """
+        shard_idx = global_idx // self.shard_size
+        local_idx = global_idx % self.shard_size
+
         return shard_idx, local_idx
 
     def _tokenize_action(self, action_vec: np.ndarray) -> torch.LongTensor:
@@ -294,7 +303,7 @@ class ShardedCoTVLADataset(Dataset):
         curr_pil    = Image.fromarray(curr_img_np)
         subgoal_pil = Image.fromarray(subgoal_img_np)
 
-        curr_image_tensor = process_image(curr_pil,    self.data_args, image_folder=None)
+        curr_image_tensor = process_image(curr_pil, self.data_args, image_folder=None)
         subgoal_image_tensor = process_image(subgoal_pil, self.data_args, image_folder=None, generation_mode=True)
 
         # Normalize to [3, H, W]
@@ -332,8 +341,10 @@ class ShardedCoTVLADataset(Dataset):
             no_system_prompt=getattr(self.data_args, "no_system_prompt", False),
         )
 
-        input_ids_base = torch.tensor(data_dict["input_ids"][0], dtype=torch.long)
-        labels_base    = torch.tensor(data_dict["labels"][0],    dtype=torch.long)
+        # input_ids_base = torch.tensor(data_dict["input_ids"][0], dtype=torch.long)
+        # labels_base    = torch.tensor(data_dict["labels"][0],    dtype=torch.long)
+        input_ids_base = data_dict["input_ids"][0].clone().detach().long()
+        labels_base    = data_dict["labels"][0].clone().detach().long()
 
         # 3. Append actions on the assistant side
         action_ids = self._tokenize_action(action_vec)
@@ -342,8 +353,33 @@ class ShardedCoTVLADataset(Dataset):
 
         action_seq = torch.cat([act_start, action_ids, act_end], dim=0)
 
-        full_input_ids = torch.cat([input_ids_base, action_seq], dim=0)
-        full_labels    = torch.cat([labels_base,    action_seq.clone()], dim=0)
+        # full_input_ids = torch.cat([input_ids_base, action_seq], dim=0)
+        # full_labels    = torch.cat([labels_base,    action_seq.clone()], dim=0)
+        # 4. Splice actions *before* EOS if EOS exists
+        eos_id = self.tokenizer.eos_token_id
+        if eos_id is None:
+            # Fallback - some tokenizers do not set eos_token_id
+            eos_id = 2
+
+        eos_positions = (input_ids_base == eos_id).nonzero(as_tuple=False)
+        if eos_positions.numel() > 0:
+            # Use the last EOS in case there is more than one
+            eos_pos = eos_positions[-1].item()
+
+            # Keep everything before EOS
+            input_before = input_ids_base[:eos_pos]
+            labels_before = labels_base[:eos_pos]
+
+            eos_input = input_ids_base[eos_pos:eos_pos + 1]   # [EOS]
+            eos_label = labels_base[eos_pos:eos_pos + 1]      # usually EOS label
+
+            # Now: [prompt + subgoal image tokens] + [act_start, actions, act_end] + [EOS]
+            full_input_ids = torch.cat([input_before, action_seq, eos_input], dim=0)
+            full_labels    = torch.cat([labels_before, action_seq.clone(), eos_label], dim=0)
+        else:
+            # No EOS found - fallback to old behavior (actions after entire sequence)
+            full_input_ids = torch.cat([input_ids_base, action_seq], dim=0)
+            full_labels    = torch.cat([labels_base, action_seq.clone()], dim=0)
 
         return {
             "input_ids": full_input_ids,

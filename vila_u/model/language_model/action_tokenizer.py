@@ -86,6 +86,61 @@ class ActionTokenizer:
 
         return self.bin_centers[discretized_actions]
 
+    def mixed_detokenize(self, input_ids, action_dim=7):
+        """
+        Detokenizes a sequence of ids that contains:
+        text, <action_start>, action tokens (flattened), <action_end>, text.
+        
+        Returns:
+            text_before: str
+            actions: np.ndarray of shape (T, action_dim)
+            text_after: str
+        """
+
+        # Convert to list if it is a tensor
+        if hasattr(input_ids, "tolist"):
+            ids = input_ids.tolist()
+        else:
+            ids = list(input_ids)
+
+        # Convert tokens to ids for the markers
+        start_id = self.tokenizer.convert_tokens_to_ids("<action_start>")
+        end_id = self.tokenizer.convert_tokens_to_ids("<action_end>")
+
+        # Locate start and end
+        if start_id not in ids or end_id not in ids:
+            raise ValueError("Input sequence must contain <action_start> and <action_end> tokens.")
+
+        s = ids.index(start_id)
+        e = ids.index(end_id)
+
+        # Split into three parts
+        text_before_ids = ids[:s]
+        action_ids_flat = ids[s + 1 : e]
+        text_after_ids = ids[e + 1 :]
+
+        # Detokenize the text parts
+        text_before = self.tokenizer.decode(text_before_ids, skip_special_tokens=False)
+        text_after = self.tokenizer.decode(text_after_ids, skip_special_tokens=False)
+
+        # Remove any placeholders such as -200 if they appear
+        clean_action_ids = [i for i in action_ids_flat if i >= 0]
+
+        # Make sure action ids length is divisible by the action dimension
+        if len(clean_action_ids) % action_dim != 0:
+            raise ValueError(
+                f"Action token block length {len(clean_action_ids)}"
+                f" is not divisible by action dimension {action_dim}."
+            )
+
+        # Reshape to (T, action_dim)
+        action_token_matrix = np.array(clean_action_ids, dtype=np.int64).reshape(-1, action_dim)
+
+        # Decode to continuous actions
+        actions = self.decode_token_ids_to_actions(action_token_matrix)
+
+        return text_before, actions, text_after
+
     @property
     def vocab_size(self) -> int:
         return self.n_bins

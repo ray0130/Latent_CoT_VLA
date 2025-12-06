@@ -14,8 +14,8 @@ export NCCL_ASYNC_ERROR_HANDLING=1
 # source ~/miniconda3/bin/activate vila-u
 
 # Global batch size and gradient accumulation
-global_bs=${BATCH_SIZE:-32}        # choose something that fits in 40GB
-acc_step=${ACC_STEP:-1}
+global_bs=${BATCH_SIZE:-8}        # choose something that fits in 40GB
+acc_step=${ACC_STEP:-8}
 bs=$((global_bs / acc_step))
 
 echo "Using per_device_train_batch_size = $bs"
@@ -36,17 +36,17 @@ python vila_u/train/train_mem.py \
     --mm_use_im_patch_token False \
     --image_aspect_ratio resize \
     --bf16 True \
-    --output_dir ./checkpoints/cot_vla_sub_tmp1 \
+    --output_dir ./checkpoints/tmp \
     --num_train_epochs 1 \
     --per_device_train_batch_size $bs \
     --per_device_eval_batch_size 4 \
     --gradient_accumulation_steps $acc_step \
     --evaluation_strategy "no" \
-    --save_strategy "steps" \
+    --save_strategy "no" \
     --save_steps 100 \
     --save_total_limit 1 \
-    --learning_rate 1e-4 \
-    --weight_decay 0. \
+    --learning_rate 5e-5 \
+    --weight_decay 0.01 \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \

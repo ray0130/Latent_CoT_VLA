@@ -29,8 +29,10 @@ class ActionTokenizer:
         self.n_dims = int(n_dims)
 
         # Convert min/max into per-dimension arrays
-        min_arr = np.asarray(min_actions, dtype=float)
-        max_arr = np.asarray(max_actions, dtype=float)
+        # min_arr = np.asarray(min_actions, dtype=float)
+        # max_arr = np.asarray(max_actions, dtype=float)
+        min_arr = np.array([-0.224535, -0.148200, -0.231590, -0.351799, -0.419301, -0.436435, -1.0], dtype=float)
+        max_arr = np.array([ 0.178247,  0.149384,  0.218423,  0.589267,  0.352727,  0.447967,  1.0], dtype=float)
 
         if min_arr.shape == ():
             min_arr = np.full(self.n_dims, float(min_arr), dtype=float)
@@ -45,7 +47,8 @@ class ActionTokenizer:
 
         self.min_actions = min_arr
         self.max_actions = max_arr
-
+        print("Min Actions: ", self.min_actions)
+        print("Max Actions: ", self.max_actions)
         # Create per-dimension uniform bins
         # Shape: (n_dims, n_bins)
         self.bins = np.linspace(
@@ -53,7 +56,7 @@ class ActionTokenizer:
             self.max_actions[:, None],
             self.n_bins,
             axis=-1,
-        )
+        ).squeeze(1)
 
         # Bin centers per dimension
         # Shape: (n_dims, n_bins - 1)
@@ -155,6 +158,61 @@ class ActionTokenizer:
 
         actions = flat_actions.reshape(orig_shape).astype(np.float32)
         return actions
+
+    def mixed_detokenize(self, input_ids):
+        """
+        Detokenizes a sequence of ids that contains:
+        text, <action_start>, action tokens (flattened), <action_end>, text.
+        
+        Returns:
+            text_before: str
+            actions: np.ndarray of shape (T, self.n_dims)
+            text_after: str
+        """
+
+        # Convert to list if it is a tensor
+        if hasattr(input_ids, "tolist"):
+            ids = input_ids.tolist()
+        else:
+            ids = list(input_ids)
+
+        # Convert tokens to ids for the markers
+        start_id = self.tokenizer.convert_tokens_to_ids("<action_start>")
+        end_id = self.tokenizer.convert_tokens_to_ids("<action_end>")
+
+        # Locate start and end
+        if start_id not in ids or end_id not in ids:
+            raise ValueError("Input sequence must contain <action_start> and <action_end> tokens.")
+
+        s = ids.index(start_id)
+        e = ids.index(end_id)
+
+        # Split into three parts
+        text_before_ids = ids[:s]
+        action_ids_flat = ids[s + 1 : e]
+        text_after_ids = ids[e + 1 :]
+
+        # Detokenize the text parts
+        text_before = self.tokenizer.decode(text_before_ids, skip_special_tokens=False)
+        text_after = self.tokenizer.decode(text_after_ids, skip_special_tokens=False)
+
+        # Remove any placeholders such as -200 if they appear
+        clean_action_ids = [i for i in action_ids_flat if i >= 0]
+
+        # Make sure action ids length is divisible by the action dimension
+        if len(clean_action_ids) % self.n_dims != 0:
+            raise ValueError(
+                f"Action token block length {len(clean_action_ids)}"
+                f" is not divisible by action dimension {self.n_dims}."
+            )
+
+        # Reshape to (T, self.n_dims)
+        action_token_matrix = np.array(clean_action_ids, dtype=np.int64).reshape(-1, self.n_dims)
+
+        # Decode to continuous actions
+        actions = self.decode_token_ids_to_actions(action_token_matrix)
+
+        return text_before, actions, text_after
 
     @property
     def vocab_size(self) -> int:

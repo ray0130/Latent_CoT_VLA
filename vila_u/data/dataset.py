@@ -72,6 +72,7 @@ def preprocess_v1(
     no_system_prompt: bool = False,
 ) -> Dict:
     conv = conversation_lib.default_conversation.copy()
+    # print("ConV: ", no_system_prompt, conv)
     if no_system_prompt:
         conv.system = ""
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
@@ -276,9 +277,25 @@ class ShardedCoTVLADataset(Dataset):
         return shard_idx, local_idx
 
     def _tokenize_action(self, action_vec: np.ndarray) -> torch.LongTensor:
+        # print("Action Vec Size: ", action_vec.shape)
         action_ids = self.action_tokenizer.encode_actions(action_vec)
         action_ids = np.asarray(action_ids).reshape(-1)
         return torch.as_tensor(action_ids, dtype=torch.long)
+
+    def print_raw(self, idx: int):
+        shard_idx, local_idx = self._get_shard_and_local_idx(idx)
+        shard_path = self.shard_paths[shard_idx]
+
+        data = np.load(shard_path, mmap_mode="r", allow_pickle=True)
+
+        curr_img_np    = data["curr_img"][local_idx]       # H, W, 3
+        subgoal_img_np = data["subgoal_img"][local_idx]    # H, W, 3
+        action_vec     = np.array(data["action_vec"][local_idx], copy=True)
+        instr_arr = np.array(data["instruction"][local_idx], copy=True)
+
+        print(f"Print example {idx} index:")
+        print(f"Instruction: {instr_arr}")
+        print(f"Action Vec: {action_vec}")
 
     def __getitem__(self, idx: int):
         shard_idx, local_idx = self._get_shard_and_local_idx(idx)
@@ -338,7 +355,7 @@ class ShardedCoTVLADataset(Dataset):
             sources,
             self.tokenizer,
             has_image=True,
-            no_system_prompt=getattr(self.data_args, "no_system_prompt", False),
+            no_system_prompt=getattr(self.data_args, "no_system_prompt", True),
         )
 
         # input_ids_base = torch.tensor(data_dict["input_ids"][0], dtype=torch.long)

@@ -316,13 +316,14 @@ class VILAUMetaForCausalLM(ABC):
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx].unsqueeze(1).expand(-1, tokens.shape[-1]))
                 continue
-
+            # print("num_images: ", num_images)
             cur_input_embeds = input_embeds_1[batch_idx]
             image_token_indices = (
                 [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
             )
+            # print("IN PREPARE: image_token_indices:", image_token_indices, torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist(), cur_input_ids.shape[0])
             cur_labels = labels[batch_idx]
-
+            # print("IN PREPARE CUR LABELS: ",cur_labels)
             cur_input_ids_noim = []
             cur_labels_noim = []
             cur_input_embeds_no_im = []
@@ -331,6 +332,7 @@ class VILAUMetaForCausalLM(ABC):
                 cur_input_ids_noim.append(cur_input_ids[image_token_indices[i] + 1 : image_token_indices[i + 1]])
                 cur_labels_noim.append(cur_labels[image_token_indices[i] + 1 : image_token_indices[i + 1]])
                 cur_input_embeds_no_im.append(cur_input_embeds[image_token_indices[i] + 1 : image_token_indices[i + 1]])
+                # print(cur_labels[image_token_indices[i] + 1 : image_token_indices[i + 1]])
 
             split_sizes = [x.shape[0] for x in cur_labels_noim]
             cur_new_input_embeds = []
@@ -344,10 +346,23 @@ class VILAUMetaForCausalLM(ABC):
                     cur_tokens = tokens[cur_image_idx]
                     cur_new_input_embeds.append(cur_image_features)
                     if self.config.mm_use_vi_start_end:
-                        if (cur_input_ids[-3] == -200 and self.llm.vocab_size - 4 in cur_new_labels[-1]) \
+                        # print("appending cur new labels USING ALL IGNORE INDEX")
+                        # print("printing condition")
+                        # print(all(x == -200 for x in cur_input_ids[-10:-3]))
+
+                        # Original code hard coded this as -3, but we need to shift the index as our action sequence is after image
+                        # So the -200 image token idx would be a -3 (original) - 32 * 7 (# action tokens) - 2 (action start/end tokens)
+                        cur_in_idx = -3 - 32 * 7 - 2
+                        # print((cur_input_ids[cur_in_idx] == -200 and self.llm.vocab_size - 4 in cur_new_labels[-1]))
+                        # print("first cur_input_ids condition: ", cur_input_ids[cur_in_idx] == -200, cur_input_ids[cur_in_idx], cur_input_ids)
+                        # print("second condition: ", self.llm.vocab_size - 4, cur_new_labels[-1], self.llm.vocab_size - 4 in cur_new_labels[-1])
+                        # print("#### end condition ####")
+                        if (cur_input_ids[cur_in_idx] == -200 and self.llm.vocab_size - 4 in cur_new_labels[-1]) \
                              or all(x == -200 for x in cur_input_ids[-10:-3]):
                             cur_new_labels.append(cur_tokens)
+                            # print("appending cur new labels here")
                         else:
+                            # print("appending cur new labels USING ALL IGNORE INDEX")
                             cur_new_labels.append(
                                 torch.full(
                                     (cur_image_features.shape[0], tokens.shape[-1]),

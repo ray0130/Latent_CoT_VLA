@@ -21,6 +21,18 @@ from vila_u.train.utils import (
     mprint,
 )
 
+from vila_u.constants import (
+    DEFAULT_IMAGE_PATCH_TOKEN,
+    DEFAULT_IM_START_TOKEN,
+    DEFAULT_IM_END_TOKEN,
+    DEFAULT_VI_START_TOKEN,
+    DEFAULT_VI_END_TOKEN,
+    IGNORE_INDEX,
+    IMAGE_TOKEN_INDEX,
+    ACTION_START, 
+    ACTION_END,
+)
+
 # import cotvla dataset and datacollator and action tokenizer
 from vila_u.data.dataset import ShardedCoTVLADataset, CoTVLADataCollator
 from vila_u.model.language_model.action_tokenizer_sepdim import ActionTokenizer
@@ -80,9 +92,14 @@ def make_cotvla_data_module(tokenizer, data_args, training_args, model):
     print("Printing Train Dataset First Example:")
     print(train_dataset[0])
     x = train_dataset[0]
-    print("Decoded Input: ")
     pad_id = tokenizer.pad_token_id  # often 0 for LLaMA-style tokenizers
     clean_ids = [pad_id if x == -200 else x for x in x['input_ids']]
+    print("Decoded Input: ")
+    x_og_decode = tokenizer.decode(clean_ids, skip_special_tokens=False)
+    print(x_og_decode)
+
+    print("Action Tokenizer Decode: ")
+    
     x_text = action_tokenizer.mixed_detokenize(clean_ids)
     print(x_text)
     print("Reference GT: ")
@@ -268,6 +285,7 @@ def train():
         config = AutoConfig.from_pretrained(resume_path, trust_remote_code=True)
         config.resume_path = resume_path
         model_cls = eval(config.architectures[0])
+        print("Resuming on ", model_cls)
     else:
         resume_from_checkpoint = False
         model_cls = VILAULlamaModel
@@ -277,6 +295,7 @@ def train():
         )
         if getattr(config, "resume_path", None) is not None:
             config.resume_path = model_args.model_name_or_path
+        print("new On : ", model_cls)
     
     prepare_config_for_training(config, model_args, training_args, data_args)
     
@@ -361,24 +380,25 @@ def train():
     # ==========================================================================
     # ### [NEW] ACTION TOKEN INJECTION START
     # ==========================================================================
-    print("Injecting CoT-VLA Action Tokens into Tokenizer...")
+    # print("Injecting CoT-VLA Action Tokens into Tokenizer...")
     
     # 1. Define the new tokens
-    action_tokens = [f"<action_{i}>" for i in reversed(range(256))]
-    special_action_tokens = ["<action_start>", "<action_end>"]
-    print("Injecting Special action tokens")
+    # action_tokens = [f"<action_{i}>" for i in reversed(range(256))]
+    # special_action_tokens = ["<action_start>", "<action_end>"]
+    # print("Injecting Special action tokens")
+    # tokens_to_add = special_action_tokens #+ action_tokens
     # 2. Resize and Smart-Init
     # We add them as 'additional_special_tokens' so they are not split by BPE
-    smart_tokenizer_and_embedding_resize(
-        special_tokens_dict={"additional_special_tokens": special_action_tokens + action_tokens},
-        tokenizer=tokenizer,
-        model=model.llm, # VILA-U wraps the core llama in .llm
-    )
+    # smart_tokenizer_and_embedding_resize(
+    #     special_tokens_dict={"additional_special_tokens": tokens_to_add},
+    #     tokenizer=tokenizer,
+    #     model=model.llm, # VILA-U wraps the core llama in .llm
+    # )
 
     # print("Injecting action tokens into vocab")
     # remap_and_reinit_action_tokens(tokenizer=tokenizer, model=model.llm, action_tokens=action_tokens)
     
-    print(f"Added {len(action_tokens) + 2} action tokens. Vocabulary size: {len(tokenizer)} ,, {tokenizer.vocab_size}")
+    # print(f"Added {len(tokens_to_add)} action tokens. Vocabulary size: {len(tokenizer)} ,, {tokenizer.vocab_size}")
     # ==========================================================================
     # ### [NEW] ACTION TOKEN INJECTION END
     # ==========================================================================
@@ -454,7 +474,7 @@ def train():
     total = sum(p.numel() for p in trainer.model.parameters())
     print(f"Trainable params: {trainable / 1e6:.1f}M / {total / 1e6:.1f}M")
 
-    n = 4
+    n = 1
     make_vila_trainable_subset(trainer.model, last_n_llm_layers=n)
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)

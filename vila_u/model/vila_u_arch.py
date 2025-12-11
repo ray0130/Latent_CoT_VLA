@@ -19,6 +19,8 @@ from vila_u.constants import (
     DEFAULT_VI_END_TOKEN,
     IGNORE_INDEX,
     IMAGE_TOKEN_INDEX,
+    ACTION_START, 
+    ACTION_END,
 )
 from vila_u.model.configuration_vila_u import VILAUConfig
 from vila_u.model.language_model.builder import build_llm_and_tokenizer
@@ -353,11 +355,13 @@ class VILAUMetaForCausalLM(ABC):
                         # Original code hard coded this as -3, but we need to shift the index as our action sequence is after image
                         # So the -200 image token idx would be a -3 (original) - 32 * 7 (# action tokens) - 2 (action start/end tokens)
                         cur_in_idx = -3 - 32 * 7 - 2
-                        # print((cur_input_ids[cur_in_idx] == -200 and self.llm.vocab_size - 4 in cur_new_labels[-1]))
+                        img_start_token_id = self.llm.vocab_size - 6
+                        # print((cur_input_ids[cur_in_idx] == -200 and img_start_token_id in cur_new_labels[-1]))
                         # print("first cur_input_ids condition: ", cur_input_ids[cur_in_idx] == -200, cur_input_ids[cur_in_idx], cur_input_ids)
                         # print("second condition: ", self.llm.vocab_size - 4, cur_new_labels[-1], self.llm.vocab_size - 4 in cur_new_labels[-1])
+                        # print("NEW second condition: ", img_start_token_id, cur_new_labels[-1], img_start_token_id in cur_new_labels[-1])
                         # print("#### end condition ####")
-                        if (cur_input_ids[cur_in_idx] == -200 and self.llm.vocab_size - 4 in cur_new_labels[-1]) \
+                        if (cur_input_ids[cur_in_idx] == -200 and img_start_token_id in cur_new_labels[-1]) \
                              or all(x == -200 for x in cur_input_ids[-10:-3]):
                             cur_new_labels.append(cur_tokens)
                             # print("appending cur new labels here")
@@ -561,9 +565,11 @@ class VILAUMetaForCausalLM(ABC):
 
         if model_args.mm_use_im_start_end:
             if model_args.mm_use_vi_start_end:
-                num_new_tokens = tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN], special_tokens=True)
+                # print("ADDING NEW TOKENS HERE")
+                num_new_tokens = tokenizer.add_tokens([ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN], special_tokens=True)
             else:
-                num_new_tokens = tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
+                # print("ADDING NEW TOKENS HERE")
+                num_new_tokens = tokenizer.add_tokens([ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
             self.resize_token_embeddings(len(tokenizer))
 
             if num_new_tokens > 0:

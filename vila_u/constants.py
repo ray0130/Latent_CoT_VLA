@@ -13,4 +13,7 @@ DEFAULT_VI_START_TOKEN = "<vi_start>"
 DEFAULT_VI_END_TOKEN = "<vi_end>"
 IMAGE_PLACEHOLDER = "<image-placeholder>"
 
+ACTION_START = "<action_start>"
+ACTION_END = "<action_end>"
+
 SENTINEL_TOKEN = "<vila/sentinel>"

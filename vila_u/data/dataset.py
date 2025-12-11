@@ -23,7 +23,7 @@ import vila_u.data.datasets_mixture as datasets_mixture
 from vila_u import conversation as conversation_lib
 from vila_u.constants import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IMAGE_TOKEN,
                                 IGNORE_INDEX, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN,
-                                    IMAGE_TOKEN_INDEX)
+                                    IMAGE_TOKEN_INDEX, ACTION_START, ACTION_END)
 from vila_u.data.datasets_mixture import DATASETS
 from vila_u.data.simple_vila_webdataset import VILAWebDataset
 from vila_u.mm_utils import tokenizer_image_token, opencv_extract_frames, process_image
@@ -221,8 +221,8 @@ class ShardedCoTVLADataset(Dataset):
         tokenizer: transformers.PreTrainedTokenizer,
         data_args,
         action_tokenizer,
-        act_start_token: str = "<action_start>",
-        act_end_token: str = "<action_end>",
+        # act_start_token: str = "<action_start>",
+        # act_end_token: str = "<action_end>",
         shard_suffix: str = ".npz",
         shard_size: int = 50,     # <--- NEW: all shards assumed to have fixed size
     ) -> None:
@@ -235,14 +235,17 @@ class ShardedCoTVLADataset(Dataset):
         self.shard_size = shard_size
 
         # Action token sanity check
-        self.act_start_id = tokenizer.convert_tokens_to_ids(act_start_token)
-        self.act_end_id   = tokenizer.convert_tokens_to_ids(act_end_token)
+        # self.act_start_id = 1 
+        # self.act_end_id = 1 
+        # ACTION_START, ACTION_END
+        self.act_start_id = tokenizer.convert_tokens_to_ids(ACTION_START)
+        self.act_end_id   = tokenizer.convert_tokens_to_ids(ACTION_END)
 
         assert self.act_start_id != tokenizer.unk_token_id, (
-            f"{act_start_token} not found in tokenizer vocabulary."
+            f"{ACTION_START} not found in tokenizer vocabulary."
         )
         assert self.act_end_id != tokenizer.unk_token_id, (
-            f"{act_end_token} not found in tokenizer vocabulary."
+            f"{ACTION_END} not found in tokenizer vocabulary."
         )
 
         # Find shards
@@ -397,7 +400,9 @@ class ShardedCoTVLADataset(Dataset):
             # No EOS found - fallback to old behavior (actions after entire sequence)
             full_input_ids = torch.cat([input_ids_base, action_seq], dim=0)
             full_labels    = torch.cat([labels_base, action_seq.clone()], dim=0)
-
+        # full_input_ids = input_ids_base
+        # full_labels = labels_base
+        # print("LABEL IN DATASET", full_labels)
         return {
             "input_ids": full_input_ids,
             "labels": full_labels,

@@ -122,8 +122,9 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
                 images,
             )
         
-        # print("Input IDS before repack multimodal data: ")
-        # print(input_ids)
+        # print("Input embed before repack multimodal data: ")
+        # print(inputs_embeds)
+        # print("Label before repack multimodal: ", labels.shape, labels[0])
         if self.training:
             (
                 _,
@@ -153,8 +154,9 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
 
         # print("After repack, New Input embeds: ", new_inputs_embeds.shape, new_inputs_embeds.min(), new_inputs_embeds.max())
         # print(new_inputs_embeds)
-        # print("After repack, New Input IDS: ")
-        # print(new_input_ids)
+        # print("After repack, new Labels ", new_labels.shape)
+        # print(new_labels)
+        # print("self llm: ", self.llm.vocab_size)
         output_attentions = output_attentions if output_attentions is not None else self.llm.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.llm.config.output_hidden_states
@@ -179,17 +181,25 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         image_hidden_states = []
         image_labels = []
         noimage_labels = []
-
+        # print("hidden state: ", hidden_states)
         for i in range(hidden_states.shape[0]):
             label = new_labels[i]
+            # print("LABEL: ", label)
             hidden_state = hidden_states[i]
             label_zero = label[:, 0].clone()
-
+            # print("img label starts: ", self.llm.vocab_size - 4, self.llm.vocab_size - 3, self.llm.vocab_size - 2, self.llm.vocab_size - 1)
+            # print("NEW img label starts: ", self.llm.vocab_size - 6, self.llm.vocab_size - 5, self.llm.vocab_size - 4, self.llm.vocab_size - 3)
+            # print("label zero:", label_zero)
+            im_start_tok_id = self.llm.vocab_size - 6
+            im_end_tok_id = self.llm.vocab_size - 5
+            video_start_tok_id = self.llm.vocab_size - 4
+            video_end_tok_id = self.llm.vocab_size - 3
+            # print("NEW img label starts: ", im_start_tok_id, im_end_tok_id, video_start_tok_id, video_end_tok_id)
             if self.config.mm_use_vi_start_end:
-                image_start_index = torch.nonzero(torch.eq(label_zero, self.llm.vocab_size - 4)).squeeze(1)
-                image_end_index = torch.nonzero(torch.eq(label_zero, self.llm.vocab_size - 3)).squeeze(1)
-                video_start_index = torch.nonzero(torch.eq(label_zero, self.llm.vocab_size - 2)).squeeze(1)
-                video_end_index = torch.nonzero(torch.eq(label_zero, self.llm.vocab_size - 1)).squeeze(1)
+                image_start_index = torch.nonzero(torch.eq(label_zero, im_start_tok_id)).squeeze(1)
+                image_end_index = torch.nonzero(torch.eq(label_zero, im_end_tok_id)).squeeze(1)
+                video_start_index = torch.nonzero(torch.eq(label_zero, video_start_tok_id)).squeeze(1)
+                video_end_index = torch.nonzero(torch.eq(label_zero, video_end_tok_id)).squeeze(1)
                 image_start_index = torch.cat([image_start_index, video_start_index])
                 image_end_index = torch.cat([image_end_index, video_end_index])
             else:
@@ -197,10 +207,11 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
                 image_end_index = torch.nonzero(torch.eq(label_zero, self.llm.vocab_size - 1)).squeeze(1)
 
             assert len(image_start_index) == len(image_end_index), f"length of image_start_index is {len(image_start_index)}, length of image_end_index is {len(image_end_index)}"
-
+            # print("FOUND IMAGE STARTINDEX: ", image_start_index, image_end_index)
             if len(image_start_index) > 0:
                 for start_idx, end_idx in zip(image_start_index, image_end_index):
                     image_label = label[start_idx+1:end_idx, :]
+                    # print("IMAGE LABELS: ", image_label)
                     image_labels.append(image_label)
                     image_hidden_state = hidden_state[start_idx:end_idx-1, :]
                     image_hidden_states.append(image_hidden_state)
@@ -211,7 +222,9 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         # For video
         image_hidden_states_aux = []
         image_labels_aux = []
+        # print("Image Hidden State: ", image_hidden_states)
         image_hidden_states_length = [img.shape[0] for img in image_hidden_states]
+        # print("Image hidden state length:", image_hidden_states_length)
         image_hidden_states_length_relative = [img // min(image_hidden_states_length) for img in image_hidden_states_length]
         for l in range(len(image_hidden_states_length_relative)):
             if image_hidden_states_length_relative[l] > 1:
@@ -234,6 +247,8 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         image_loss = None
         if torch.is_tensor(image_hidden_states):
             if hasattr(self.vision_tower.vision_tower, "rqvaesiglip"):
+                # print("image_labels: ", image_labels)
+                # print("IMAGE LABEL SHIFTED: ",image_labels - self.llm.vocab_size)
                 outs = self.vision_tower.vision_tower.rqtransformer(image_hidden_states, image_labels - self.llm.vocab_size, self.vision_tower.vision_tower.rqvaesiglip)
             else:
                 raise NotImplementedError()

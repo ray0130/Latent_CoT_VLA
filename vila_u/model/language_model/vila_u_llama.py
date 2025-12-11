@@ -14,6 +14,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from ..configuration_vila_u import VILAUConfig
 from ..vila_u_arch import VILAUMetaModel, VILAUMetaForCausalLM
 
+from vila_u.constants import (ACTION_START, ACTION_END)
 
 class VILAULlamaConfig(VILAUConfig):
     model_type = "vila_u_llama"
@@ -88,6 +89,63 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         # If there is a custom save_pretrained on VILAUMetaModel, this will run it.
         # Otherwise fallback to the standard PreTrainedModel.save_pretrained.
         self.save_pretrained(save_dir)
+    # import torch
+
+    def build_cot_vla_attention_mask(self, input_ids, pad_mask, dtype=torch.float32):
+        """
+        input_ids: (B, S) long
+        pad_mask: (B, S) bool or 0/1, 1 means not pad
+        Returns: additive mask of shape (B, 1, S, S)
+        """
+        ACTION_START_ID = self.llm.vocab_size - 2 #tokenizer.convert_tokens_to_ids(ACTION_START)
+        print("ACTION_START_ID:", ACTION_START_ID)
+        print("present?", (input_ids[0] == ACTION_START_ID).any())
+        device = input_ids.device
+        pad_mask = pad_mask.to(dtype=dtype)   # 1 for real tokens, 0 for pad
+        B, S = pad_mask.shape
+
+        # how many tokens at the end should be full attention
+        FULL_BLOCK_LEN = 32 * 7 + 1 + 2  # last 32*7 actions + 1 eos
+
+        # base_valid[b, i, j] = 1 only if both i and j are non pad for that batch item
+        base_valid = pad_mask.unsqueeze(1) * pad_mask.unsqueeze(2)   # (B, S, S)
+
+        # global causal mask for sequence of length S
+        causal = torch.tril(torch.ones(S, S, device=device, dtype=torch.float32))  # (S, S)
+
+        mixed = torch.zeros(B, S, S, device=device, dtype=torch.float32)
+
+        for b in range(B):
+            # effective length of this sequence
+            seq_len_b = int(pad_mask[b].sum().item())
+            if seq_len_b == 0:
+                continue  # all pad, nothing to do
+
+            # length of full-attention tail for this sequence
+            tail_len = min(FULL_BLOCK_LEN, seq_len_b)
+            start_full = seq_len_b - tail_len   # index where full-attention region starts
+
+            # region before the tail: standard causal
+            if start_full > 0:
+                mixed[b, :start_full, :seq_len_b] = causal[:start_full, :seq_len_b]
+
+            # tail region: full attention within the non pad range
+            mixed[b, start_full:seq_len_b, :seq_len_b] = 1.0
+
+        # enforce padding constraint
+        mixed = mixed * base_valid  # zero out any attention involving pads
+        # print("Mixed mask Logical: ")
+        # for bb in range(mixed.shape[0]):
+        #     for i in range(mixed.shape[1]):
+        #         print(mixed.shape, mixed[bb, i, :])
+        # convert to additive 4D mask
+        # 1 => allowed => 0
+        # 0 => disallowed => large negative
+        finfo = torch.finfo(dtype)
+        additive = (1.0 - mixed) * finfo.min  # (B, S, S)
+        additive = additive.unsqueeze(1)      # (B, 1, S, S)
+
+        return additive
 
     def forward(
         self,
@@ -105,6 +163,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         # print("Initial Input IDS: ", input_ids.shape, input_ids.min(), input_ids.max())
         # print(input_ids[0])
+        # initial_input_ids = input_ids
         if inputs_embeds is None:
             (
                 input_ids,
@@ -156,8 +215,19 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         # print(new_inputs_embeds)
         # print("After repack, new Labels ", new_labels.shape)
         # print(new_labels)
-        # print("self llm: ", self.llm.vocab_size)
+        # print("self llm: ", self.llm)
         output_attentions = output_attentions if output_attentions is not None else self.llm.config.output_attentions
+        # print("input ids: ", input_ids)
+        # print("new attention mask pads:", new_attention_mask)
+
+
+        # Code to create mixed attention (Causal + Full) mask
+        # Currently not in use due to CUDA Error
+        # custom_mixed_attention_mask = self.build_cot_vla_attention_mask(initial_input_ids, new_attention_mask, dtype=new_inputs_embeds.dtype)
+        
+        # print("Output attention shape: ", output_attentions)
+        # print("attention mask: ",new_attention_mask.shape, new_attention_mask)
+        # print("custom_mixed_attention_mask: ", custom_mixed_attention_mask.shape)
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.llm.config.output_hidden_states
         )

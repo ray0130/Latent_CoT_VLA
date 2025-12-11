@@ -7,7 +7,7 @@ from typing import Dict, Optional, Sequence, List
 @dataclass
 class DataArguments:
     data_mixture: str = "llava_1_5_mm_align"
-    image_aspect_ratio: str = "square"
+    image_aspect_ratio: str = "resize"
     lazy_preprocess: bool = False
     vflan_no_system_prompt: bool = False
     num_video_frames: int = 8

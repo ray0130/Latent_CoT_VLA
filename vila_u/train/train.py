@@ -50,7 +50,7 @@ def make_cotvla_data_module(tokenizer, data_args, training_args, model):
     """
     # 1. Load Action Stats (binned action file)
     # You might want to add 'action_bins_path' to DataArguments
-    action_bins_path = getattr(data_args, "action_bins_path", "./test_data/action_bin_edges.npy") 
+    # action_bins_path = getattr(data_args, "action_bins_path", "./test_data/action_bin_edges.npy") 
     
     print("skipping loading action")
     # print(f"Loading action tokenizer stats from {action_bins_path}...")
@@ -457,11 +457,18 @@ def train():
         callbacks=callbacks,
         **data_module,
     )
+    trainer.current_dataset_name = "rt_1"
 
     print(
         "length of dataloader:",
         len(trainer.get_train_dataloader()),
         len(trainer.train_dataset),
+        flush=True,
+    )
+    print(
+        "length of dataloader:",
+        len(trainer.get_eval_dataloader()),
+        len(trainer.eval_dataset),
         flush=True,
     )
     print(

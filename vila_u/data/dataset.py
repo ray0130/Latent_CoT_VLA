@@ -224,7 +224,7 @@ class ShardedCoTVLADataset(Dataset):
         # act_start_token: str = "<action_start>",
         # act_end_token: str = "<action_end>",
         shard_suffix: str = ".npz",
-        shard_size: int = 50,     # <--- NEW: all shards assumed to have fixed size
+        shard_size: int = 100,     # <--- NEW: all shards assumed to have fixed size
     ) -> None:
         super().__init__()
 
@@ -240,6 +240,9 @@ class ShardedCoTVLADataset(Dataset):
         # ACTION_START, ACTION_END
         self.act_start_id = tokenizer.convert_tokens_to_ids(ACTION_START)
         self.act_end_id   = tokenizer.convert_tokens_to_ids(ACTION_END)
+
+        # self.act_start_id = 1 #tokenizer.convert_tokens_to_ids(ACTION_START)
+        # self.act_end_id   = 2 #tokenizer.convert_tokens_to_ids(ACTION_END)
 
         assert self.act_start_id != tokenizer.unk_token_id, (
             f"{ACTION_START} not found in tokenizer vocabulary."
@@ -263,7 +266,7 @@ class ShardedCoTVLADataset(Dataset):
         # Global dataset length = num_shards * shard_size
         self._len = self.num_shards * self.shard_size
 
-        print(f"Found {self.num_shards} shards; total dataset size = {self._len}")
+        print(f"Found {self.num_shards} shards with shardsize {self.shard_size}; total dataset size = {self._len}")
 
     def __len__(self):
         return self._len
@@ -299,6 +302,43 @@ class ShardedCoTVLADataset(Dataset):
         print(f"Print example {idx} index:")
         print(f"Instruction: {instr_arr}")
         print(f"Action Vec: {action_vec}")
+    
+    def get_raw(self, idx: int):
+        shard_idx, local_idx = self._get_shard_and_local_idx(idx)
+        shard_path = self.shard_paths[shard_idx]
+
+        data = np.load(shard_path, mmap_mode="r", allow_pickle=True)
+
+        curr_img_np    = data["curr_img"][local_idx]       # H, W, 3
+        subgoal_img_np = data["subgoal_img"][local_idx]    # H, W, 3
+        action_vec     = np.array(data["action_vec"][local_idx], copy=True)
+        instr_arr = np.array(data["instruction"][local_idx], copy=True)
+
+        curr_img_np    = np.asarray(curr_img_np,    dtype=np.uint8)
+        subgoal_img_np = np.asarray(subgoal_img_np, dtype=np.uint8)
+
+        instr_arr = np.array(data["instruction"][local_idx], copy=True)
+        if instr_arr.ndim == 0:
+            instruction = str(instr_arr.item())
+        else:
+            instruction = str(instr_arr[local_idx])
+
+        # 1. Process both images
+        curr_pil    = Image.fromarray(curr_img_np)
+        subgoal_pil = Image.fromarray(subgoal_img_np)
+
+        action_ids = self._tokenize_action(action_vec)
+        act_start  = torch.tensor([self.act_start_id], dtype=torch.long)
+        act_end    = torch.tensor([self.act_end_id],   dtype=torch.long)
+
+        action_seq = torch.cat([act_start, action_ids, act_end], dim=0)
+
+        return {
+            "instr": instruction,
+            "curr_img_pil": curr_pil,
+            "subgoal_img_pil": subgoal_pil,
+            "action_seq" : action_seq
+        }
 
     def __getitem__(self, idx: int):
         shard_idx, local_idx = self._get_shard_and_local_idx(idx)

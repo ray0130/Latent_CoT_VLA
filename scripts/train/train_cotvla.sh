@@ -14,8 +14,8 @@ export NCCL_ASYNC_ERROR_HANDLING=1
 # source ~/miniconda3/bin/activate vila-u
 
 # Global batch size and gradient accumulation
-global_bs=${BATCH_SIZE:-8}        # choose something that fits in 40GB
-acc_step=${ACC_STEP:-4}
+global_bs=${BATCH_SIZE:-512}        # choose something that fits in 40GB
+acc_step=${ACC_STEP:-64}
 bs=$((global_bs / acc_step))
 
 echo "Using per_device_train_batch_size = $bs"
@@ -36,14 +36,14 @@ python vila_u/train/train_mem.py \
     --mm_use_im_patch_token False \
     --image_aspect_ratio resize \
     --bf16 True \
-    --output_dir ./checkpoints/tmps \
-    --num_train_epochs 1 \
+    --output_dir ./checkpoints/cotvla_v1 \
+    --num_train_epochs 0.5 \
     --per_device_train_batch_size $bs \
     --per_device_eval_batch_size $bs \
     --gradient_accumulation_steps $acc_step \
     --evaluation_strategy "steps" \
-    --eval_steps 10 \
-    --save_strategy "no" \
+    --eval_steps 100 \
+    --save_strategy "steps" \
     --save_steps 100 \
     --save_total_limit 1 \
     --learning_rate 5e-5 \
@@ -52,9 +52,9 @@ python vila_u/train/train_mem.py \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \
-    --model_max_length 4096 \
+    --model_max_length 1024 \
     --gradient_checkpointing True \
     --dataloader_num_workers 0 \
     --lazy_preprocess True \
     --vflan_no_system_prompt True \
-    --report_to none
+    --report_to wandb

@@ -51,6 +51,8 @@ class VILAUMetaModel(ABC):
 
         self.llm, self.tokenizer = build_llm_and_tokenizer(llm_cfg, config, *args, **kwargs)
         self.vision_tower = build_vision_tower(vision_tower_cfg, config)
+        print("initializing vision tower")
+        print("image processor in VILA U META MODEL", self.vision_tower.image_processor)
         self.mm_projector = build_mm_projector(mm_projector_cfg, config)
 
         self.post_config()
@@ -355,7 +357,12 @@ class VILAUMetaForCausalLM(ABC):
                         # Original code hard coded this as -3, but we need to shift the index as our action sequence is after image
                         # So the -200 image token idx would be a -3 (original) - 32 * 7 (# action tokens) - 2 (action start/end tokens)
                         cur_in_idx = -3 - 32 * 7 - 2
+                        if cur_input_ids.shape[0] < -1 * cur_in_idx:
+                            # fall back to original index of -3 this only happens in inference and we do not care about labels here
+                            cur_in_idx = -3
                         img_start_token_id = self.llm.vocab_size - 6
+                        # print(cur_in_idx, cur_input_ids)
+                        # print(img_start_token_id, cur_new_labels)
                         # print((cur_input_ids[cur_in_idx] == -200 and img_start_token_id in cur_new_labels[-1]))
                         # print("first cur_input_ids condition: ", cur_input_ids[cur_in_idx] == -200, cur_input_ids[cur_in_idx], cur_input_ids)
                         # print("second condition: ", self.llm.vocab_size - 4, cur_new_labels[-1], self.llm.vocab_size - 4 in cur_new_labels[-1])
@@ -591,6 +598,7 @@ class VILAUMetaForCausalLM(ABC):
         cfg: Optional[float] = 3.0,
         **generation_kwargs,
     ):
+        print("Input IDS to put into prepare and model generate", input_ids)
         if images is not None:
             (_, _, attention_mask, _, inputs_embeds, _) = self.prepare_inputs_labels_for_multimodal(
                 input_ids, None, attention_mask, None, None, images
@@ -600,6 +608,10 @@ class VILAUMetaForCausalLM(ABC):
         inputs_embeds = inputs_embeds.to(self.dtype)
 
         if images is not None:
+            # print("generating with input embeds: ", inputs_embeds.shape, inputs_embeds)
+            # print("attention mask: ", attention_mask)
+            # # generation_kwargs['generation_config']
+            # print("generation args: ", generation_kwargs)
             outputs = self.llm.generate(inputs_embeds=inputs_embeds, attention_mask=attention_mask, **generation_kwargs)
 
             return outputs
@@ -618,6 +630,36 @@ class VILAUMetaForCausalLM(ABC):
 
             return image_ids
     
+    @torch.inference_mode()
+    def generate_cotvla(self, prompt: Union[str, List], generation_config: Optional[GenerationConfig] = None) -> str:
+        conversation = [{"from": "human", "value": prompt}]
+
+        media = extract_media(conversation, self.config)
+
+        if "image" in media:
+            images = process_images(media["image"], self.vision_tower.image_processor, self.config).to(self.device, dtype=eval(self.config.model_dtype))
+        else:
+            images = None
+
+        input_ids = tokenize_conversation(conversation, self.tokenizer, add_generation_prompt=True, image_generation=True).cuda().unsqueeze(0)
+        print("input ids to pass: ", input_ids)
+        input_id_1b = input_ids[0]
+        pad_id = self.tokenizer.pad_token_id  # often 0 for LLaMA-style tokenizers
+        clean_ids = [pad_id if x == -200 else x for x in input_id_1b]
+        print("decoded input ids: ", self.tokenizer.decode(clean_ids, skip_special_tokens=False))
+        # self.tokenizer.model_max_length = 512
+        # Manually fix generation max length
+        print(self.llm.generation_config)
+        self.llm.generation_config.max_length = 512
+        generation_config = generation_config or self.default_generation_config
+        # generation_config['max_length'] = 512
+        print("generation_config, ", generation_config)
+        output_ids = self.generate(input_ids=input_ids, images=images, generation_config=generation_config)
+
+        # response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
+
+        return output_ids
+
     @torch.inference_mode()
     def generate_content(self, prompt: Union[str, List], generation_config: Optional[GenerationConfig] = None) -> str:
         conversation = [{"from": "human", "value": prompt}]

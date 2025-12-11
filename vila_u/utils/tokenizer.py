@@ -4,7 +4,7 @@ import transformers
 from typing import Any, Dict, List, Optional, Sequence
 
 from vila_u import conversation as conversation_lib
-from vila_u.constants import IGNORE_INDEX, SENTINEL_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_VI_START_TOKEN
+from vila_u.constants import IGNORE_INDEX, SENTINEL_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_VI_START_TOKEN, ACTION_START, ACTION_END
 from vila_u.mm_utils import tokenizer_image_token
 from vila_u.utils.logging import logger
 
@@ -51,15 +51,22 @@ def tokenize_conversation(
             conv.append_message(role, overrides[message["from"]])
         else:
             conv.append_message(role, message["value"])
-    
+
+    # Image token starts first
+    # prompt = f" {DEFAULT_IM_START_TOKEN}"
     prompt = conv.get_prompt()
+    # print("PROMPT: ", prompt)
+    # Testing inject action start generation token
+    
     if image_generation:
         prompt += f" {DEFAULT_IM_START_TOKEN}"
     elif video_generation:
         prompt += f" {DEFAULT_VI_START_TOKEN}"
     else:
         pass
-
+    # I don't think we manually inject action tokens here
+    # prompt += f" {ACTION_START}"
+    # print("PROMPT: ", prompt)
     return tokenizer_image_token(prompt, tokenizer, return_tensors="pt")
 
 def _maybe_add_sentinel_token(tokenizer: transformers.PreTrainedTokenizer) -> None:

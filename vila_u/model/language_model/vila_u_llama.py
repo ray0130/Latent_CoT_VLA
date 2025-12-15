@@ -1,6 +1,9 @@
 import os
 import torch
 
+import torch.nn as nn
+import torch.nn.functional as F
+
 from torch.nn import CrossEntropyLoss
 from typing import List, Optional, Tuple, Union
 from transformers import (
@@ -16,6 +19,8 @@ from ..vila_u_arch import VILAUMetaModel, VILAUMetaForCausalLM
 
 from vila_u.constants import (ACTION_START, ACTION_END)
 
+from transformers import CLIPModel, CLIPImageProcessor
+
 class VILAULlamaConfig(VILAUConfig):
     model_type = "vila_u_llama"
 
@@ -27,9 +32,33 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
     
     def __init__(self, config: VILAULlamaConfig = None, *args, **kwargs) -> None:
         super().__init__(config)
-        
-        return self.init_vlm(config=config, *args, **kwargs)
-        
+
+        init_vlm_output = self.init_vlm(config=config, *args, **kwargs)
+        print("Init vlm output: ", init_vlm_output)
+
+        # Subgoal Embedder
+        self.subgoal_clip = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        self.subgoal_clip_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        self.subgoal_clip.requires_grad_(False)
+        self.subgoal_clip.eval()
+        self.clip_dim = self.subgoal_clip.config.projection_dim
+
+        # Subgoal Head
+        llm_hidden = self.llm.config.hidden_size
+        self.subgoal_head = nn.Sequential(
+            nn.Linear(llm_hidden, llm_hidden),
+            nn.GELU(),
+            nn.Linear(llm_hidden, self.clip_dim),
+        )
+        self.subgoal_loss_weight = 5.0
+        print("############### SUBGOAL ################ Successfully initialized Subgoal Head and CLIP Model")
+
+        return init_vlm_output
+    
+    # Move Clip model to GPU
+    def _move_subgoal_clip_to_device(self, device):
+        self.subgoal_clip.to(device)
+
     @classmethod
     def from_pretrained(
         cls,
@@ -160,11 +189,21 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        subgoal_images: Optional[torch.FloatTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+
+        # print("SUBGOAL IMAGES: ", subgoal_images)
         # print("Initial Input IDS: ", input_ids.shape, input_ids.min(), input_ids.max())
         # print(input_ids[0])
-        # initial_input_ids = input_ids
+        # # initial_input_ids = input_ids
+        # print("position ids: ", position_ids)
+
+        # print("Images: ", images.shape, images)
+
+        # print("labels: ", labels.shape, labels)
+        
         if inputs_embeds is None:
+            # print("input embed is none")
             (
                 input_ids,
                 position_ids,
@@ -181,8 +220,10 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
                 images,
             )
         
-        # print("Input embed before repack multimodal data: ")
+        # print("Input embed before repack multimodal data: ", inputs_embeds.shape)
         # print(inputs_embeds)
+        # print("Input IDS before repack multimodal data: ")
+        # print(input_ids)
         # print("Label before repack multimodal: ", labels.shape, labels[0])
         if self.training:
             (
@@ -233,6 +274,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         )
         return_dict = return_dict if return_dict is not None else self.llm.config.use_return_dict
 
+        # print("Input embeds to insert into model: ", inputs_embeds.shape, inputs_embeds)
         outputs = self.llm.model(
             input_ids=new_input_ids,
             attention_mask=new_attention_mask,
@@ -248,6 +290,57 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
 
         hidden_states = outputs[0]
 
+        # Subgoal Calculations
+        loss_subgoal = None
+        if self.training and (subgoal_images is not None):
+            B = hidden_states.shape[0]
+            device = hidden_states.device
+
+            # Check subgoal images 
+            assert len(subgoal_images) == hidden_states.shape[0]
+            # CLIP target embeddings (frozen)
+            with torch.no_grad():
+                clip_inputs = self.subgoal_clip_processor(
+                    images=subgoal_images,
+                    return_tensors="pt",
+                )
+                clip_pixel_values = clip_inputs["pixel_values"].to(device, dtype=hidden_states.dtype)
+                target_embed = self.subgoal_clip.get_image_features(pixel_values=clip_pixel_values)  # (B, clip_dim)
+                target_embed = F.normalize(target_embed, dim=-1)
+            
+            
+            # print("target std", target_embed.std(dim=0).mean().item())
+
+            # Find Subgoal Position in new_labels
+            label0 = new_labels[:, :, 0]  # (B, L)
+            subgoal_positions = []
+            # print("New labels: ", new_labels.shape, new_labels)
+            # print("label 0: , ", label0.shape, label0)
+            # print('subgoal image position: and stored version', self.llm.vocab_size - 3, self.subgoal_token_id)
+            for b in range(B):
+                pos = (label0[b] == self.subgoal_token_id).nonzero(as_tuple=False)
+                if pos.numel() == 0:
+                    raise ValueError("Could not find <subgoal> token id in labels for batch item {}".format(b))
+                subgoal_positions.append(pos[0].item())
+            
+            # Pass through subgoal head and calculate loss
+
+            h = torch.stack([hidden_states[b, t, :] for b, t in enumerate(subgoal_positions)], dim=0)  # (B, H)
+            pred_embed = self.subgoal_head(h)  # (B, clip_dim)
+            pred_embed = F.normalize(pred_embed, dim=-1)
+            # print("subgoal hidden std", h.std(dim=0).mean().item())
+            # print("pred std", pred_embed.std(dim=0).mean().item())
+            # print("cos mean", (pred_embed * target_embed).sum(dim=-1).mean().item())
+
+            sim = (target_embed.float() @ target_embed.float().T)
+
+            off = sim[~torch.eye(sim.size(0), dtype=torch.bool, device=sim.device)]
+            # print("target offdiag cos mean/std/min/max:",
+                # off.mean().item(), off.std().item(), off.min().item(), off.max().item())
+
+            # Cosine distance loss
+            loss_subgoal = 1.0 - (pred_embed * target_embed).sum(dim=-1).mean()
+
         image_hidden_states = []
         image_labels = []
         noimage_labels = []
@@ -260,10 +353,11 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
             # print("img label starts: ", self.llm.vocab_size - 4, self.llm.vocab_size - 3, self.llm.vocab_size - 2, self.llm.vocab_size - 1)
             # print("NEW img label starts: ", self.llm.vocab_size - 6, self.llm.vocab_size - 5, self.llm.vocab_size - 4, self.llm.vocab_size - 3)
             # print("label zero:", label_zero)
-            im_start_tok_id = self.llm.vocab_size - 6
-            im_end_tok_id = self.llm.vocab_size - 5
-            video_start_tok_id = self.llm.vocab_size - 4
-            video_end_tok_id = self.llm.vocab_size - 3
+            extra_tokens = 3
+            im_start_tok_id = self.llm.vocab_size - 4 - extra_tokens
+            im_end_tok_id = self.llm.vocab_size - 3 - extra_tokens
+            video_start_tok_id = self.llm.vocab_size - 2 - extra_tokens
+            video_end_tok_id = self.llm.vocab_size - 1 - extra_tokens
             # print("NEW img label starts: ", im_start_tok_id, im_end_tok_id, video_start_tok_id, video_end_tok_id)
             if self.config.mm_use_vi_start_end:
                 image_start_index = torch.nonzero(torch.eq(label_zero, im_start_tok_id)).squeeze(1)
@@ -292,7 +386,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         # For video
         image_hidden_states_aux = []
         image_labels_aux = []
-        # print("Image Hidden State: ", image_hidden_states)
+        # print("Image Hidden State: ", len(image_hidden_states), image_hidden_states[0].shape, image_hidden_states)
         image_hidden_states_length = [img.shape[0] for img in image_hidden_states]
         # print("Image hidden state length:", image_hidden_states_length)
         image_hidden_states_length_relative = [img // min(image_hidden_states_length) for img in image_hidden_states_length]
@@ -327,16 +421,28 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
             image_labels = image_labels.reshape(B*seq_len*D).contiguous() - self.llm.vocab_size
             image_loss = loss_fct(image_logits, image_labels)
 
+        # print("my no img label: ", noimage_labels.shape, noimage_labels)
         loss = None
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = noimage_labels[..., 1:].contiguous()
+        # print("before view shift_labels: ", shift_labels.shape, shift_labels.min(), shift_labels.max(), shift_labels)
         shift_logits = shift_logits.view(-1, self.llm.config.vocab_size)
         shift_labels = shift_labels.view(-1)
         shift_labels = shift_labels.to(shift_logits.device)
+        # print("shifted logits: ", shift_logits)
+        # print(" shift_labels: ", shift_labels.shape, shift_labels.min(), shift_labels.max(), shift_labels)
         loss = loss_fct(shift_logits, shift_labels)
+
+
+        # print(f"loss: Image: {image_loss}  Text: {loss}  Subgoal: original: {loss_subgoal}, times weight: {self.subgoal_loss_weight * loss_subgoal}")
 
         if image_loss is not None:
             loss = loss + image_loss
+        
+        # combine subgoal loss
+        if loss_subgoal is not None:
+            loss = loss + self.subgoal_loss_weight * loss_subgoal if loss is not None else loss_subgoal
+        
 
         return CausalLMOutputWithPast(
             loss=loss,

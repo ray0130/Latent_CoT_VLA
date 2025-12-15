@@ -268,7 +268,7 @@ class ShardedCoTVLADataset(Dataset):
         # Global dataset length = num_shards * shard_size
         self._len = self.num_shards * self.shard_size
         # TMP Set total length to 8
-        self._len = 100
+        # self._len = 100
         print(f"Found {self.num_shards} shards with shardsize {self.shard_size}; total dataset size = {self._len}")
 
         self.type = "Latent"

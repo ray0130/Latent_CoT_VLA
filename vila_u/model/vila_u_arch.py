@@ -21,6 +21,7 @@ from vila_u.constants import (
     IMAGE_TOKEN_INDEX,
     ACTION_START, 
     ACTION_END,
+    SUBGOAL_TOKEN,
 )
 from vila_u.model.configuration_vila_u import VILAUConfig
 from vila_u.model.language_model.builder import build_llm_and_tokenizer
@@ -96,6 +97,10 @@ class VILAUMetaModel(ABC):
         vlm.vision_tower = build_vision_tower(vision_tower_cfg, config)
         vlm.mm_projector = build_mm_projector(mm_projector_cfg, config)
 
+        # load subgoal Head
+        ckpt = torch.load(osp.join(output_dir, "subgoal_head.pt"), map_location="cpu")
+        self.subgoal_head.load_state_dict(ckpt["state_dict"], strict=True)
+        
         self.post_config()
         self.is_loaded = True
 
@@ -144,6 +149,23 @@ class VILAUMetaModel(ABC):
                 state_dict=mm_projector_state_dict,
             )
             self.config.mm_projector_cfg = self.mm_projector.config
+
+        # Save subgoal Head
+        state_dict = self.state_dict()
+        subgoal_state_dict = OrderedDict(
+            {k.split("subgoal_head.")[-1]: v for k, v in state_dict.items() if k.startswith("subgoal_head.")}
+        )
+
+        save_path = osp.join(output_dir, "subgoal_head.pt")
+        torch.save(
+            {
+                "state_dict": subgoal_state_dict,
+                "llm_hidden": self.llm.config.hidden_size,
+                "clip_dim": self.clip_dim,
+            },
+            save_path,
+        )
+        print(f"saving subgoal_head to {save_path}")
 
         self.config._name_or_path = output_dir
         self.config.architectures = [self.__class__.__name__]
@@ -270,8 +292,9 @@ class VILAUMetaForCausalLM(ABC):
             images = images.flatten(0, 1)
 
         input_image_ids = input_ids[input_ids == IMAGE_TOKEN_INDEX]
+        # print("input image ids", input_image_ids.shape)
         image_features, tokens = self.encode_images(images, input_image_ids)
-
+        # print("encoded img token and features: ", image_features.shape, tokens.shape)
         _labels = labels
         _position_ids = position_ids
         _attention_mask = attention_mask
@@ -290,7 +313,7 @@ class VILAUMetaForCausalLM(ABC):
         input_ids_copy = input_ids.clone()
         input_ids_copy[input_ids_copy == IMAGE_TOKEN_INDEX] = 0
         input_embeds = self.llm.model.embed_tokens(input_ids_copy)
-        
+        # print("right after llm model embed tokens input embeds: ", input_embeds.shape, input_embeds)
         # for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask):
         #     print(f"Input IDS range: {cur_input_ids.min()}, {cur_input_ids.max()}")
         #     print(f"attention Mask range: {cur_attention_mask.min()}, {cur_attention_mask.max()}")
@@ -309,10 +332,11 @@ class VILAUMetaForCausalLM(ABC):
         new_input_embeds = []
         new_labels = []
         cur_image_idx = 0
-
+        # print("input ids shape: ", len(input_ids))
         for batch_idx, cur_input_ids in enumerate(input_ids):
             cur_input_ids = input_ids[batch_idx]
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+            # print("NUM IMG: ", num_images)
             if num_images == 0:
                 cur_image_features = image_features[0]
                 cur_input_embeds_1 = input_embeds_1[batch_idx]
@@ -346,6 +370,7 @@ class VILAUMetaForCausalLM(ABC):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i].unsqueeze(1).expand(-1, tokens.shape[-1]))
                 if i < num_images:
+                    # print("inputting image features for ", cur_image_idx)
                     cur_image_features = image_features[cur_image_idx]
                     cur_tokens = tokens[cur_image_idx]
                     cur_new_input_embeds.append(cur_image_features)
@@ -356,11 +381,12 @@ class VILAUMetaForCausalLM(ABC):
 
                         # Original code hard coded this as -3, but we need to shift the index as our action sequence is after image
                         # So the -200 image token idx would be a -3 (original) - 32 * 7 (# action tokens) - 2 (action start/end tokens)
-                        cur_in_idx = -3 - 32 * 7 - 2
+                        num_action_sequence = 5
+                        cur_in_idx = - 3 - num_action_sequence * 7 - 2
                         if cur_input_ids.shape[0] < -1 * cur_in_idx:
                             # fall back to original index of -3 this only happens in inference and we do not care about labels here
                             cur_in_idx = -3
-                        img_start_token_id = self.llm.vocab_size - 6
+                        img_start_token_id = self.llm.vocab_size - 4 - 3 # 3 because we add additional ACTION_START, ACTION_END, SUBGOAL_IMAGE
                         # print(cur_in_idx, cur_input_ids)
                         # print(img_start_token_id, cur_new_labels)
                         # print((cur_input_ids[cur_in_idx] == -200 and img_start_token_id in cur_new_labels[-1]))
@@ -419,6 +445,7 @@ class VILAUMetaForCausalLM(ABC):
             dtype=new_labels[0].dtype,
             device=new_labels[0].device,
         )
+        # print("new_labels_padded shape: ", new_labels_padded.shape)
         attention_mask = torch.zeros(
             (batch_size, max_len),
             dtype=attention_mask.dtype,
@@ -483,7 +510,8 @@ class VILAUMetaForCausalLM(ABC):
 
         if _position_ids is None:
             position_ids = None
-
+        # print("Prepare new input embeds", new_input_embeds.shape, new_input_embeds)
+        # print("Prepare New labels", new_labels.shape, new_labels)
         return (
             None,
             position_ids,
@@ -573,10 +601,10 @@ class VILAUMetaForCausalLM(ABC):
         if model_args.mm_use_im_start_end:
             if model_args.mm_use_vi_start_end:
                 # print("ADDING NEW TOKENS HERE")
-                num_new_tokens = tokenizer.add_tokens([ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN], special_tokens=True)
+                num_new_tokens = tokenizer.add_tokens([SUBGOAL_TOKEN, ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN], special_tokens=True)
             else:
                 # print("ADDING NEW TOKENS HERE")
-                num_new_tokens = tokenizer.add_tokens([ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
+                num_new_tokens = tokenizer.add_tokens([SUBGOAL_TOKEN, ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
             self.resize_token_embeddings(len(tokenizer))
 
             if num_new_tokens > 0:
@@ -588,7 +616,10 @@ class VILAUMetaForCausalLM(ABC):
 
                 input_embeddings[-num_new_tokens:] = input_embeddings_avg
                 output_embeddings[-num_new_tokens:] = output_embeddings_avg
-    
+
+        # Store Subgoal Image token
+        self.subgoal_token_id = tokenizer.convert_tokens_to_ids("<subgoal_img>")
+
     @torch.inference_mode()
     def generate(
         self,
@@ -628,10 +659,11 @@ class VILAUMetaForCausalLM(ABC):
             )
             image_ids = torch.cat(image_ids, dim=1)
 
-            return image_ids
-    
+        return outputs
+
     @torch.inference_mode()
     def generate_cotvla(self, prompt: Union[str, List], generation_config: Optional[GenerationConfig] = None) -> str:
+        print("raw prompt: ", prompt)
         conversation = [{"from": "human", "value": prompt}]
 
         media = extract_media(conversation, self.config)
@@ -640,8 +672,9 @@ class VILAUMetaForCausalLM(ABC):
             images = process_images(media["image"], self.vision_tower.image_processor, self.config).to(self.device, dtype=eval(self.config.model_dtype))
         else:
             images = None
-
-        input_ids = tokenize_conversation(conversation, self.tokenizer, add_generation_prompt=True, image_generation=True).cuda().unsqueeze(0)
+        print("images", images)
+        print("conversation: ", conversation)
+        input_ids = tokenize_conversation(conversation, self.tokenizer, add_generation_prompt=True, image_generation=False).cuda().unsqueeze(0)
         print("input ids to pass: ", input_ids)
         input_id_1b = input_ids[0]
         pad_id = self.tokenizer.pad_token_id  # often 0 for LLaMA-style tokenizers
@@ -654,8 +687,8 @@ class VILAUMetaForCausalLM(ABC):
         generation_config = generation_config or self.default_generation_config
         # generation_config['max_length'] = 512
         print("generation_config, ", generation_config)
-        output_ids = self.generate(input_ids=input_ids, images=images, generation_config=generation_config)
-
+        output_ids = self.generate(input_ids=input_ids, images=images, generation_config=generation_config, max_new_tokens=self.vision_tower.image_tokens+2+5 * 7)
+        # print("image ids: ", image_ids)
         # response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
 
         return output_ids

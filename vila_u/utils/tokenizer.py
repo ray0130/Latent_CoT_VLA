@@ -32,8 +32,8 @@ def tokenize_conversation(
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
-    if no_system_prompt:
-        conv.system = ""
+    # if no_system_prompt:
+    conv.system = ""
 
     # Skip the first message if it is not from human
     if messages[0]["from"] != "human":

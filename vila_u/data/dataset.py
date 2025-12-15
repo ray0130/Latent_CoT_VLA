@@ -221,7 +221,7 @@ class ShardedCoTVLADataset(Dataset):
         tokenizer: transformers.PreTrainedTokenizer,
         data_args,
         action_tokenizer,
-        subgoal_img_processor,
+        # subgoal_img_processor,
         # act_start_token: str = "<action_start>",
         # act_end_token: str = "<action_end>",
         shard_suffix: str = ".npz",

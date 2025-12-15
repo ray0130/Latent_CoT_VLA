@@ -23,7 +23,7 @@ import vila_u.data.datasets_mixture as datasets_mixture
 from vila_u import conversation as conversation_lib
 from vila_u.constants import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IMAGE_TOKEN,
                                 IGNORE_INDEX, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN,
-                                    IMAGE_TOKEN_INDEX, ACTION_START, ACTION_END)
+                                    IMAGE_TOKEN_INDEX, ACTION_START, ACTION_END, SUBGOAL_TOKEN)
 from vila_u.data.datasets_mixture import DATASETS
 from vila_u.data.simple_vila_webdataset import VILAWebDataset
 from vila_u.mm_utils import tokenizer_image_token, opencv_extract_frames, process_image
@@ -221,6 +221,7 @@ class ShardedCoTVLADataset(Dataset):
         tokenizer: transformers.PreTrainedTokenizer,
         data_args,
         action_tokenizer,
+        subgoal_img_processor,
         # act_start_token: str = "<action_start>",
         # act_end_token: str = "<action_end>",
         shard_suffix: str = ".npz",
@@ -260,13 +261,18 @@ class ShardedCoTVLADataset(Dataset):
         if not shard_paths:
             raise ValueError(f"No .npz shards found in {data_dir}")
 
+        # self.shard_paths = [shard_paths[0]]
         self.shard_paths = shard_paths
-        self.num_shards = len(shard_paths)
+        self.num_shards = len(self.shard_paths)
 
         # Global dataset length = num_shards * shard_size
         self._len = self.num_shards * self.shard_size
-
+        # TMP Set total length to 8
+        self._len = 100
         print(f"Found {self.num_shards} shards with shardsize {self.shard_size}; total dataset size = {self._len}")
+
+        self.type = "Latent"
+        print(f"Is Dataset CoT with subgoal image? {self.type}")
 
     def __len__(self):
         return self._len
@@ -361,10 +367,8 @@ class ShardedCoTVLADataset(Dataset):
 
         # 1. Process both images
         curr_pil    = Image.fromarray(curr_img_np)
-        subgoal_pil = Image.fromarray(subgoal_img_np)
 
         curr_image_tensor = process_image(curr_pil, self.data_args, image_folder=None)
-        subgoal_image_tensor = process_image(subgoal_pil, self.data_args, image_folder=None, generation_mode=True)
 
         # Normalize to [3, H, W]
         if curr_image_tensor.ndim == 4 and curr_image_tensor.size(0) == 1:
@@ -372,19 +376,34 @@ class ShardedCoTVLADataset(Dataset):
         elif curr_image_tensor.ndim != 3:
             raise ValueError(f"Unexpected current image tensor shape: {curr_image_tensor.shape}")
 
-        if subgoal_image_tensor.ndim == 4 and subgoal_image_tensor.size(0) == 1:
-            subgoal_image_tensor = subgoal_image_tensor[0]
-        elif subgoal_image_tensor.ndim != 3:
-            raise ValueError(f"Unexpected subgoal image tensor shape: {subgoal_image_tensor.shape}")
-
-        # This sample has 2 images: [2, 3, H, W]
-        image_for_model = torch.stack([curr_image_tensor, subgoal_image_tensor], dim=0)
+        
+        if self.type == "COT":
+            subgoal_pil = Image.fromarray(subgoal_img_np)
+            subgoal_image_tensor = process_image(subgoal_pil, self.data_args, image_folder=None, generation_mode=True)
+            if subgoal_image_tensor.ndim == 4 and subgoal_image_tensor.size(0) == 1:
+                subgoal_image_tensor = subgoal_image_tensor[0]
+            elif subgoal_image_tensor.ndim != 3:
+                raise ValueError(f"Unexpected subgoal image tensor shape: {subgoal_image_tensor.shape}")
+            
+            # This sample has 2 images: [2, 3, H, W]
+            image_for_model = torch.stack([curr_image_tensor, subgoal_image_tensor], dim=0)
+            gpt_value   = f"{DEFAULT_IMAGE_TOKEN}\n"
+        elif self.type == "VLA":
+            # Only 1 image
+            image_for_model = curr_image_tensor
+            gpt_value   = f" "
+        else:
+            ## Then it is Latent CoT VLA
+            subgoal_pil = Image.fromarray(subgoal_img_np)
+            image_for_model = curr_image_tensor
+            gpt_value   = f"{SUBGOAL_TOKEN}"
 
         # 2. Build conversation:
         #    human: <image>\ninstruction
         #    gpt:   <image>\n
         human_value = f"{DEFAULT_IMAGE_TOKEN}\n{instruction}"
-        gpt_value   = f"{DEFAULT_IMAGE_TOKEN}\n"
+        # gpt_value   = f"{DEFAULT_IMAGE_TOKEN}\n"
+        # gpt_value   = f" "
 
         conversation = [
             {"from": "human", "value": human_value},
@@ -405,6 +424,10 @@ class ShardedCoTVLADataset(Dataset):
         # labels_base    = torch.tensor(data_dict["labels"][0],    dtype=torch.long)
         input_ids_base = data_dict["input_ids"][0].clone().detach().long()
         labels_base    = data_dict["labels"][0].clone().detach().long()
+
+        # print("Dataset sanity check input ids and labels")
+        # print("input ids: ", input_ids_base)
+        # print("labels ids: ", labels_base)
 
         # 3. Append actions on the assistant side
         action_ids = self._tokenize_action(action_vec)
@@ -443,6 +466,14 @@ class ShardedCoTVLADataset(Dataset):
         # full_input_ids = input_ids_base
         # full_labels = labels_base
         # print("LABEL IN DATASET", full_labels)
+        if self.type == "Latent":
+            return {
+                "input_ids": full_input_ids,
+                "labels": full_labels,
+                "image": image_for_model,  # [2, 3, H, W]
+                "subgoal_img": subgoal_pil
+            }
+            # subgoal_pil
         return {
             "input_ids": full_input_ids,
             "labels": full_labels,
@@ -462,6 +493,7 @@ class CoTVLADataCollator:
         input_ids_list = [inst["input_ids"] for inst in instances]
         labels_list    = [inst["labels"] for inst in instances]
         images_list    = [inst.get("image", None) for inst in instances]
+        subgoal_list    = [inst.get("subgoal_img", None) for inst in instances]
 
         # 1. Pad input_ids
         input_ids = torch.nn.utils.rnn.pad_sequence(
@@ -482,6 +514,9 @@ class CoTVLADataCollator:
 
         # 4. Stack images into [B, 2, 3, H, W]
         valid_images = [img for img in images_list if img is not None]
+        valid_subgoal_images =[img for img in subgoal_list if img is not None]
+        # if len(valid_subgoal_images) > 0:
+        # else:
 
         if len(valid_images) > 0:
             processed = []
@@ -519,6 +554,7 @@ class CoTVLADataCollator:
             "labels": labels,
             "attention_mask": attention_mask,
             "images": images,
+            "subgoal_images": valid_subgoal_images,
         }
 
         return batch

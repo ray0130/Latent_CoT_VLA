@@ -15,5 +15,6 @@ IMAGE_PLACEHOLDER = "<image-placeholder>"
 
 ACTION_START = "<action_start>"
 ACTION_END = "<action_end>"
+SUBGOAL_TOKEN = "<subgoal_img>"
 
 SENTINEL_TOKEN = "<vila/sentinel>"

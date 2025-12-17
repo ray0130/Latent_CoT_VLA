@@ -221,6 +221,7 @@ class ShardedCoTVLADataset(Dataset):
         tokenizer: transformers.PreTrainedTokenizer,
         data_args,
         action_tokenizer,
+        model_type, # "COT" | "VLA" | else ("Latent")
         # subgoal_img_processor,
         # act_start_token: str = "<action_start>",
         # act_end_token: str = "<action_end>",
@@ -271,7 +272,7 @@ class ShardedCoTVLADataset(Dataset):
         # self._len = 100
         print(f"Found {self.num_shards} shards with shardsize {self.shard_size}; total dataset size = {self._len}")
 
-        self.type = "Latent"
+        self.type = model_type # "COT" | "VLA" | else ("Latent")
         print(f"Is Dataset CoT with subgoal image? {self.type}")
 
     def __len__(self):

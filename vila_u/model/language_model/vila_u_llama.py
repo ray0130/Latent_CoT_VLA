@@ -21,6 +21,13 @@ from vila_u.constants import (ACTION_START, ACTION_END)
 
 from transformers import CLIPModel, CLIPImageProcessor
 
+from dataclasses import dataclass
+@dataclass
+class CausalLMOutputWithPastAndLosses(CausalLMOutputWithPast):
+    image_loss: torch.FloatTensor = None
+    action_loss: torch.FloatTensor = None
+
+
 class VILAULlamaConfig(VILAUConfig):
     model_type = "vila_u_llama"
 
@@ -190,6 +197,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         subgoal_images: Optional[torch.FloatTensor] = None,
+        num_extra_tokens: Optional[int] = None, # Latent: 3, COT: 2
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
         # print("SUBGOAL IMAGES: ", subgoal_images)
@@ -292,7 +300,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
 
         # Subgoal Calculations
         loss_subgoal = None
-        if self.training and (subgoal_images is not None):
+        if self.training and subgoal_images: # (subgoal_images is not None):
             B = hidden_states.shape[0]
             device = hidden_states.device
 
@@ -353,7 +361,11 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
             # print("img label starts: ", self.llm.vocab_size - 4, self.llm.vocab_size - 3, self.llm.vocab_size - 2, self.llm.vocab_size - 1)
             # print("NEW img label starts: ", self.llm.vocab_size - 6, self.llm.vocab_size - 5, self.llm.vocab_size - 4, self.llm.vocab_size - 3)
             # print("label zero:", label_zero)
-            extra_tokens = 3
+            if num_extra_tokens is not None:
+                extra_tokens = num_extra_tokens
+            else:
+                extra_tokens = 3 # Latent: 3, COT: 2
+            print(f"in vila_u_llama.py: extra_tokens = {extra_tokens}")
             im_start_tok_id = self.llm.vocab_size - 4 - extra_tokens
             im_end_tok_id = self.llm.vocab_size - 3 - extra_tokens
             video_start_tok_id = self.llm.vocab_size - 2 - extra_tokens
@@ -386,6 +398,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         # For video
         image_hidden_states_aux = []
         image_labels_aux = []
+        print(f"image_hidden_states: {image_hidden_states}")
         # print("Image Hidden State: ", len(image_hidden_states), image_hidden_states[0].shape, image_hidden_states)
         image_hidden_states_length = [img.shape[0] for img in image_hidden_states]
         # print("Image hidden state length:", image_hidden_states_length)
@@ -432,6 +445,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         # print("shifted logits: ", shift_logits)
         # print(" shift_labels: ", shift_labels.shape, shift_labels.min(), shift_labels.max(), shift_labels)
         loss = loss_fct(shift_logits, shift_labels)
+        action_loss = loss
 
 
         # print(f"loss: Image: {image_loss}  Text: {loss}  Subgoal: original: {loss_subgoal}, times weight: {self.subgoal_loss_weight * loss_subgoal}")
@@ -444,12 +458,15 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
             loss = loss + self.subgoal_loss_weight * loss_subgoal if loss is not None else loss_subgoal
         
 
-        return CausalLMOutputWithPast(
+        # return CausalLMOutputWithPast(
+        return CausalLMOutputWithPastAndLosses(
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
+            image_loss=image_loss, # [TODO]
+            action_loss=action_loss, # [TODO]
         )
         
 

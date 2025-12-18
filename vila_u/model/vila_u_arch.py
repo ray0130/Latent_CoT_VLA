@@ -100,7 +100,8 @@ class VILAUMetaModel(ABC):
         # load subgoal Head
         ckpt = torch.load(osp.join(output_dir, "subgoal_head.pt"), map_location="cpu")
         self.subgoal_head.load_state_dict(ckpt["state_dict"], strict=True)
-        
+        print("Loaded subgoal Head")
+
         self.post_config()
         self.is_loaded = True
 
@@ -386,7 +387,7 @@ class VILAUMetaForCausalLM(ABC):
                         if cur_input_ids.shape[0] < -1 * cur_in_idx:
                             # fall back to original index of -3 this only happens in inference and we do not care about labels here
                             cur_in_idx = -3
-                        img_start_token_id = self.llm.vocab_size - 4 - 3 # 3 because we add additional ACTION_START, ACTION_END, SUBGOAL_IMAGE
+                        img_start_token_id = self.llm.vocab_size - 4 - 2 # 3 because we add additional ACTION_START, ACTION_END, SUBGOAL_IMAGE
                         # print(cur_in_idx, cur_input_ids)
                         # print(img_start_token_id, cur_new_labels)
                         # print((cur_input_ids[cur_in_idx] == -200 and img_start_token_id in cur_new_labels[-1]))
@@ -601,10 +602,10 @@ class VILAUMetaForCausalLM(ABC):
         if model_args.mm_use_im_start_end:
             if model_args.mm_use_vi_start_end:
                 # print("ADDING NEW TOKENS HERE")
-                num_new_tokens = tokenizer.add_tokens([SUBGOAL_TOKEN, ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN], special_tokens=True)
+                num_new_tokens = tokenizer.add_tokens([ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN], special_tokens=True)
             else:
                 # print("ADDING NEW TOKENS HERE")
-                num_new_tokens = tokenizer.add_tokens([SUBGOAL_TOKEN, ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
+                num_new_tokens = tokenizer.add_tokens([ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
             self.resize_token_embeddings(len(tokenizer))
 
             if num_new_tokens > 0:
@@ -674,6 +675,59 @@ class VILAUMetaForCausalLM(ABC):
             images = None
         print("images", images)
         print("conversation: ", conversation)
+        input_ids = tokenize_conversation(conversation, self.tokenizer, add_generation_prompt=True, image_generation=True).cuda().unsqueeze(0)
+        print("input ids to pass: ", input_ids)
+        input_id_1b = input_ids[0]
+        pad_id = self.tokenizer.pad_token_id  # often 0 for LLaMA-style tokenizers
+        clean_ids = [pad_id if x == -200 else x for x in input_id_1b]
+        print("decoded input ids: ", self.tokenizer.decode(clean_ids, skip_special_tokens=False))
+        # self.tokenizer.model_max_length = 512
+        # Manually fix generation max length
+        print(self.llm.generation_config)
+        self.llm.generation_config.max_length = 512
+        generation_config = generation_config or self.default_generation_config
+
+        cfg_conversation = [{"from": "human", "value": " "}]
+        cfg_input_ids = tokenize_conversation(cfg_conversation, self.tokenizer, add_generation_prompt=True, image_generation=True).cuda().unsqueeze(0)
+
+        input_image_ids = input_ids[input_ids == IMAGE_TOKEN_INDEX]
+        # print("input image ids", input_image_ids.shape)
+        image_features, img_tokens = self.encode_images(images, input_image_ids)
+
+        print("image_features", image_features.shape, image_features)
+        print("img_tokens: ", img_tokens.shape, img_tokens)
+        # input_ids = torch.zeros(input_ids.shape, dtype=input_ids[0].dtype).cuda()
+        attention_mask = torch.zeros(input_ids.shape).bool().cuda()
+        # input_ids[i, -len(input_ids_list[i]):] = input_ids_list[i]
+        attention_mask[0, -input_ids.shape[1]:] = True
+        print("input ids to pass into self.generate(): ", input_ids)
+        # generation_config['max_length'] = 512
+        print("generation_config, ", generation_config)
+        image_ids = self.generate(input_ids=input_ids, images=images, attention_mask=attention_mask, cfg=3.0, max_new_tokens=self.vision_tower.image_tokens, use_cache=True)
+        print("generated image ids: ", image_ids)
+        # output_ids = self.generate(input_ids=input_ids, images=images, generation_config=generation_config, max_new_tokens=self.vision_tower.image_tokens+2+5 * 7)
+        # print("image ids: ", image_ids)
+        # response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
+
+        return output_ids
+
+    @torch.inference_mode()
+    def generate_vla(self, prompt: Union[str, List], generation_config: Optional[GenerationConfig] = None) -> str:
+        print("raw prompt: ", prompt)
+        # COT VLA prompt
+        # conversation = [{"from": "human", "value": prompt}, {"from": "gpt", "value": f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IM_END_TOKEN}\n{ACTION_START}"}]
+        # Base VLA prompt
+        conversation = [{"from": "human", "value": prompt}, {"from": "gpt", "value": f" "}]
+        # Latent VLA prompt
+        conversation = [{"from": "human", "value": prompt}, {"from": "gpt", "value": f"{SUBGOAL_TOKEN}"}]
+        media = extract_media(conversation, self.config)
+
+        if "image" in media:
+            images = process_images(media["image"], self.vision_tower.image_processor, self.config).to(self.device, dtype=eval(self.config.model_dtype))
+        else:
+            images = None
+        print("images", images)
+        print("conversation: ", conversation)
         input_ids = tokenize_conversation(conversation, self.tokenizer, add_generation_prompt=True, image_generation=False).cuda().unsqueeze(0)
         print("input ids to pass: ", input_ids)
         input_id_1b = input_ids[0]
@@ -687,7 +741,8 @@ class VILAUMetaForCausalLM(ABC):
         generation_config = generation_config or self.default_generation_config
         # generation_config['max_length'] = 512
         print("generation_config, ", generation_config)
-        output_ids = self.generate(input_ids=input_ids, images=images, generation_config=generation_config, max_new_tokens=self.vision_tower.image_tokens+2+5 * 7)
+        length = 35 + 5 # Modify length here based on model type, 
+        output_ids = self.generate(input_ids=input_ids, images=images, generation_config=generation_config, max_new_tokens=length, min_new_tokens=length)
         # print("image ids: ", image_ids)
         # response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
 

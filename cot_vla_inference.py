@@ -21,6 +21,9 @@ import time
 import torch
 from dataclasses import dataclass
 
+from vila_u.constants import ACTION_START, ACTION_END
+
+
 def save_image(response, path):
     os.makedirs(path, exist_ok=True)
     for i in range(response.shape[0]):
@@ -63,19 +66,17 @@ def eval_teacher_forcing(
     total_img_loss = 0.0
     total_act_loss = 0.0
     n_batches = 0
+    accuracy = []
+    accuracy_start = []
+    accuracy_end = []
+    mse = []
+    mse_per_dim = []
+    valid = 0
 
-    # -------- token IDs --------
-    # Prefer constants if they exist in tokenizer; fallback to known ids if you hardcoded them.
-    # In your code base you import ACTION_START/ACTION_END strings from vila_u.constants.
-    # Usually tokenizer has them as added special tokens.
-    try:
-        ACTION_START_ID = tokenizer.convert_tokens_to_ids(ACTION_START)
-        ACTION_END_ID   = tokenizer.convert_tokens_to_ids(ACTION_END)
-    except Exception:
-        # Fallback: if your teammate hardcoded action_start at 32135 etc.
-        # Replace with your actual ids if needed.
-        ACTION_START_ID = 32135
-        ACTION_END_ID   = 32136
+    print(f"ACTION_START={ACTION_START}, ACTION_END={ACTION_END}")
+    ACTION_START_ID = tokenizer.convert_tokens_to_ids(ACTION_START)
+    ACTION_END_ID   = tokenizer.convert_tokens_to_ids(ACTION_END)
+    print(f"ACTION_START_ID={ACTION_START_ID}, ACTION_END_ID={ACTION_END_ID}")
 
     # -------- stats --------
     correct_boundary = 0
@@ -94,8 +95,8 @@ def eval_teacher_forcing(
         # Move tensors to device (ignore non-tensors like strings/PIL)
         batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
         batch["images"] = batch["images"].to(dtype=model_dtype) # [TODO]
-        print(f"in cot_vla_inference.py: batch['subgoal_images']: {batch['subgoal_images']}")
-        print(f"in cot_vla_inference.py: batch['labels'][0]: {batch['labels'][0]}")
+        # print(f"in cot_vla_inference.py: batch['subgoal_images']: {batch['subgoal_images']}")
+        # print(f"in cot_vla_inference.py: batch['labels'][0]: {batch['labels'][0]}")
         # batch = {
         #     "input_ids": input_ids,
         #     "labels": labels,
@@ -104,9 +105,8 @@ def eval_teacher_forcing(
         #     "subgoal_images": valid_subgoal_images,
         # }
 
-
-        print("model dtype:", next(model.parameters()).dtype)
-        print("images dtype:", batch.get("images", None).dtype if batch.get("images", None) is not None else None)
+        # print("model dtype:", next(model.parameters()).dtype)
+        # print("images dtype:", batch.get("images", None).dtype if batch.get("images", None) is not None else None)
 
         if mode == "Latent":
             out = model(
@@ -124,7 +124,7 @@ def eval_teacher_forcing(
                 labels=batch.get("labels", None),
                 images=batch.get("images", None),   # <-- your forward takes `images`
                 subgoal_images=batch.get("subgoal_images", None),
-                # num_extra_tokens=2, 
+                num_extra_tokens=2, 
             )
 
         # 1) loss
@@ -139,83 +139,106 @@ def eval_teacher_forcing(
         
         n_batches += 1
 
-        # 2) token predictions
+        # 2) token prediction accuracy
         logits = out.logits                 # [B, S, V]
         preds = logits.argmax(dim=-1)       # [B, S]
 
         labels = batch["labels"]            # what dataset provides; shape depends on your collator
-        # In your forward, you treat `new_labels[i]` as [S, something] and do label[:,0].
-        # But externally, your dataset/collator might already be [B, S] (common).
-        # Handle both cases:
-        if labels.dim() == 3:
-            labels_1d = labels[..., 0]      # [B, S]
-        else:
-            labels_1d = labels              # [B, S]
+        input_ids = batch["input_ids"]   
 
-        # Align for next-token prediction (same shift convention as your forward)
-        # model predicts token at t+1 using logits at t
-        preds_shift  = preds[:, :-1]            # [B, S-1]
-        labels_shift = labels_1d[:, 1:]         # [B, S-1]
+        # print(f"logits: {logits}")
+        # print(f"logits.shape: {logits.shape}")
+        # print(f"preds = logits.argmax(dim=-1): {preds}")
+        # print(f"preds.shape: {preds.shape}")
+        # print(f"labels: {labels}")
+        # print(f"labels.shape: {labels.shape}")
+        # print(f"labels[0]: {labels[0]}")
 
-        # ignore positions that are -100 (HF ignore_index)
-        valid_mask = labels_shift.ne(-100)
+        preds_shift = preds[:, :-1]   # [B, S-1]
+        # tgts_shift = input_ids[:, 1:] # [B, S-1]
+        
+        tgts_shift = labels[:, 1:]
+        # print(f"preds_shift: {preds_shift}")
+        # print(f"labels_shift: {labels_shift}")
+        
+        B, S = tgts_shift.shape
+        # print(f"B, S = {B}, {S}")
+        preds_shift = preds_shift[:, -S:]
+        # print(f"preds_shift.shape: {preds_shift.shape}")
 
-        # # Optional: overall token accuracy on non-ignored labels (sanity check)
-        # if valid_mask.any():
-        #     correct_all += (preds_shift[valid_mask] == labels_shift[valid_mask]).sum().item()
-        #     total_all += valid_mask.sum().item()
-
-        # --- boundary token accuracy ---
-        boundary_mask = valid_mask & (
-            labels_shift.eq(ACTION_START_ID) | labels_shift.eq(ACTION_END_ID)
-        )
-        if boundary_mask.any():
-            correct_boundary += (preds_shift[boundary_mask] == labels_shift[boundary_mask]).sum().item()
-            total_boundary += boundary_mask.sum().item()
-
-        # --- action token accuracy (between <action_start> and <action_end> in LABELS) ---
-        # We locate action span based on label sequence (teacher-forcing ensures it exists if data is correct).
-        B, S1 = labels_shift.shape
+        tgts_action_mask = torch.zeros_like(tgts_shift, dtype=torch.bool)
         for b in range(B):
-            y = labels_shift[b]     # [S-1]
-            p = preds_shift[b]      # [S-1]
+            ids = labels[b]
+            # print(f"(ids == ACTION_START_ID).nonzero(as_tuple=True): {(ids == ACTION_START_ID).nonzero(as_tuple=True)}")
+            # print(f"(ids == ACTION_END_ID).nonzero(as_tuple=True): {(ids == ACTION_END_ID).nonzero(as_tuple=True)}")
+            s = (ids == ACTION_START_ID).nonzero(as_tuple=True)[0][0]
+            e = (ids == ACTION_END_ID).nonzero(as_tuple=True)[0][0]
+            tgts_action_mask[b, s-1:e] = True
+        
+        tgts_action  = tgts_shift[tgts_action_mask]
+        preds_action = preds_shift[tgts_action_mask]
+        print(f"tgts_action: {tgts_action}")
+        print(f"preds_action: {preds_action}")
 
-            # find first start/end after shifting
-            start_pos = (y == ACTION_START_ID).nonzero(as_tuple=False)
-            end_pos   = (y == ACTION_END_ID).nonzero(as_tuple=False)
+        acc = (preds_action[1:-1] == tgts_action[1:-1]).float().mean()
+        print(acc)
+        accuracy.append(acc.item())
 
-            if len(start_pos) == 0 or len(end_pos) == 0:
-                continue
+        start_acc = (
+            (preds_action == ACTION_START_ID) &
+            (tgts_action == ACTION_START_ID)
+        ).float().sum() / (tgts_action == ACTION_START_ID).sum()
+        
+        accuracy_start.append(start_acc.item())
 
-            s = int(start_pos[0].item())
-            # choose the first end that occurs AFTER start
-            e_candidates = end_pos[end_pos[:, 0] > s]
-            if len(e_candidates) == 0:
-                continue
-            e = int(e_candidates[0].item())
+        end_acc = (
+            (preds_action == ACTION_END_ID) &
+            (tgts_action == ACTION_END_ID)
+        ).float().sum() / (tgts_action == ACTION_END_ID).sum()
 
-            if e <= s + 1:
-                continue  # nothing between
+        accuracy_end.append(end_acc.item())
+        
+        # 3) MSE
+        try:
+            act = action_tokenizer.mixed_detokenize(preds_action)
+            print("\n\nAction Tokenizer decode: ", act)
+            gt_act = action_tokenizer.mixed_detokenize(tgts_action)
+            print("\nGT Action: ", gt_act)
 
-            # positions strictly between boundaries
-            region = torch.arange(s + 1, e, device=y.device)
-            # also exclude ignore-index locations (if any)
-            region = region[y[region].ne(-100)]
-            if region.numel() == 0:
-                continue
+            se = (act[-2] - gt_act[-2]) ** 2
+            # se = np.array(se)
+            # print(f"se: {se}")
+            mse_seq_per_dim = se.mean(axis=0)
+            # print(f"mse_seq: {mse_seq}")
+            mse_per_dim.append(mse_seq_per_dim)
 
-            correct_action += (p[region] == y[region]).sum().item()
-            total_action += region.numel()
+            # se = (act[-2] - gt_act[-2]) ** 2 
+            # print("Squared error: ", se)
+            # mse_seq = se.mean(axis=0)
+            # print("MSE along sequence dim: first dim: ", mse_seq)
+            # mse_all = mse_seq.mean()
+            # print("Total MSE: ",mse_all)
+            # errors.append(mse_seq)
+            valid += 1
+        except Exception as e:
+            print(f"Exception: {e}")
+            print(f"Invalid Generation")
 
+    batch_mse_dim = np.stack(mse_per_dim, axis=0).mean(axis=0)
 
     metrics = {
         "avg_img_loss": total_img_loss / max(n_batches, 1),
         "avg_act_loss": total_act_loss / max(n_batches, 1),
+        "action_token_acc": sum(accuracy) / len(accuracy),
+        "action_start_acc": sum(accuracy_start) / len(accuracy_start),
+        "action_end_acc": sum(accuracy_end) / len(accuracy_end),
+        "avg_mse_per_dim": batch_mse_dim,
+        "valid": valid,
         # "overall_token_acc_nonignored": (correct_all / total_all) if total_all else 0.0,
-        "boundary_token_acc": (correct_boundary / total_boundary) if total_boundary else 0.0,
-        "action_token_acc": (correct_action / total_action) if total_action else 0.0,
-        "total_boundary_tokens": float(total_boundary),
-        "total_action_tokens": float(total_action),
+        # "boundary_token_acc": (correct_boundary / total_boundary) if total_boundary else 0.0,
+        # "action_token_acc": (correct_action / total_action) if total_action else 0.0,
+        # "total_boundary_tokens": float(total_boundary),
+        # "total_action_tokens": float(total_action),
         "num_batches": float(n_batches),
     }
     return metrics
@@ -253,7 +276,7 @@ if __name__ == "__main__":
     # else:
     #     raise ValueError("No model path provided!")
 
-    # model_path = "checkpoints/latent_cotvla/checkpoint-560" # cotvla_vfix | latent_cotvla/checkpoint-560
+    # model_path = "checkpoints/latent_cotvla/checkpoint-560" # cotvla_vfix | latent_cotvla/checkpoint-560 | checkpoints/base_vla_v2/checkpoint-700
     model_path = eval_args.model_path
     # model_path = "vila-u-7b-256"
     model = vila_u.load(model_path)
@@ -289,7 +312,7 @@ if __name__ == "__main__":
     print(f"Loading CoT Data From: {data_path}")
 
     eval_dataset = ShardedCoTVLADataset(
-        data_dir=os.path.join(data_path, "eval"), # Path to folder containing .npz shards
+        data_dir=os.path.join(data_path, "eval"), # "eval" # Path to folder containing .npz shards
         tokenizer=tokenizer,
         data_args=data_args,
         # vision_tower=vision_tower,
@@ -306,99 +329,9 @@ if __name__ == "__main__":
 
     dataloader = DataLoader(
         eval_dataset,
-        batch_size=2,
+        batch_size=8, # 2
         collate_fn=data_collator
     )
 
     metrics = eval_teacher_forcing(model, dataloader, tokenizer, eval_args.mode, device="cuda", max_batches=50)
     print(metrics)
-
-    print("Printing Train Dataset First Example:")
-    print(eval_dataset[0])
-    x = eval_dataset[0]
-    pad_id = tokenizer.pad_token_id  # often 0 for LLaMA-style tokenizers
-    clean_ids = [pad_id if x == -200 else x for x in x['input_ids']]
-    print("Decoded Input: ")
-    x_og_decode = tokenizer.decode(clean_ids, skip_special_tokens=False)
-    print(x_og_decode)
-
-    print("Action Tokenizer Decode: ")
-    
-    x_text = action_tokenizer.mixed_detokenize(clean_ids)
-    print(x_text)
-    print("Reference GT: ")
-    print(eval_dataset.print_raw(0))
-
-    # print("first dataset example:", x)
-    
-    first_raw = eval_dataset.get_raw(0)
-    print("first dataset example:", first_raw)
-
-    instruction = first_raw["curr_img_pil"]
-    curr_img = first_raw["curr_img_pil"]
-    # cur_img = Image.fromarray(curr_img_np)
-
-    print("Image: ", curr_img)
-    print("Instruction: ", instruction)
-    # data_collator = CoTVLADataCollator(
-    #     tokenizer=tokenizer,
-    #     data_args=data_args,
-    # )
-
-    # dataloader = DataLoader(
-    #     eval_dataset,
-    #     batch_size=2,
-    #     collate_fn=data_collator
-    # )
-    # # Get next batch
-    # data_iterator = iter(dataloader)
-    # next_batch = next(data_iterator)
-    # print("Next Batch: ", next_batch)
-
-    st = time.time()
-    output_id = model.generate_cotvla([curr_img, instruction])[0].clone()
-
-    et = time.time()
-    print("model generate took: ", round(et-st, 2), "seconds")
-
-    # Manually inject action start token at the front
-    output_id[0] = 32135
-    # outputs = model.generate(x["input_ids"], x["image"])
-    print("output shape: ", output_id.shape)
-    print("output from model: ", output_id)
-    
-
-    print("Original Tokenizer decode: ", tokenizer.decode(output_id, skip_special_tokens=False).strip())
-
-    curr_img.save("testing_eval_img.jpg")
-    act = action_tokenizer.mixed_detokenize(output_id)
-    print("\n\nAction Tokenizer decode: ", act)
-    # output_token_decode = tokenizer.decode(outputs, skip_special_tokens=False)
-
-    # if args.query is not None:
-    #     generation_config = model.default_generation_config
-    #     generation_config.temperature = args.temperature
-    #     generation_config.top_p = args.top_p
-    #     if args.image_path is not None:
-    #         image = vila_u.Image(args.image_path)
-    #         response = model.generate_content([image, args.query])
-    #         print("\033[1;32mResponse:\033[0m", response)
-    #         exit()
-    #     elif args.video_path is not None:
-    #         video = vila_u.Video(args.video_path)
-    #         response = model.generate_content([video, args.query])
-    #         print("\033[1;32mResponse:\033[0m", response)
-    #         exit()
-    #     else:
-    #         raise ValueError("No visual content input!")
-    # elif args.prompt is not None:
-    #     if args.video_generation:
-    #         response = model.generate_video_content(args.prompt, args.cfg, args.generation_nums)
-    #         save_video(response, args.save_path)
-    #         exit()
-    #     else:
-    #         response = model.generate_image_content(args.prompt, args.cfg, args.generation_nums)
-    #         save_image(response, args.save_path)
-    #         exit()
-    # else:
-    #     raise ValueError("No query or prompt provided!")

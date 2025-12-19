@@ -192,7 +192,7 @@ if __name__ == "__main__":
         #
         action_start_id = 32005
         action_end_id = 32006
-        start_position = 4
+        start_position = 3
         repair_flag = False
         if output_id[start_position] != action_start_id:
             output_id[start_position] = action_start_id

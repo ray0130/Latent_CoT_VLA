@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 from PIL import Image, ImageFile
 
 import time
+from dataclasses import dataclass
 
 def save_image(response, path):
     os.makedirs(path, exist_ok=True)
@@ -40,8 +41,15 @@ def save_video(response, path):
 
 
 if __name__ == "__main__":
-    parser = HfArgumentParser((DataArguments))
-    data_args = cast(Tuple[DataArguments], parser.parse_args_into_dataclasses())[0]
+    @dataclass
+    class EvalArguments:
+        mode: str  # "VLA" | "COT" | "Latent"
+        model_path: str
+        N: int # number of samples
+
+    parser = HfArgumentParser((EvalArguments, DataArguments))
+    # data_args = cast(Tuple[DataArguments], parser.parse_args_into_dataclasses())[0]
+    eval_args, data_args = parser.parse_args_into_dataclasses()
     
     # parser = argparse.ArgumentParser()
     # # parser.add_argument("--model_path", type=str, required=True)
@@ -67,12 +75,13 @@ if __name__ == "__main__":
     # model_path = "checkpoints/cot_vla_20keps"
     # model_path = "checkpoints/cotvla_v1/checkpoint-100"
     # model_path = "checkpoints_v2/tmps_v3_overfit8"
-    model_path = "./checkpoints/cotvla_vfix"
+    # model_path = "./checkpoints/cotvla_vfix"
     # model_path = "checkpoints/latent_cotvla/step420_save"
     # model_path = "checkpoints/latent_cotvla/checkpoint-560"
     # model_path = "checkpoints/tmp_latent_cotvla/checkpoint-220"
     # model_path = "checkpoints_v2/base_vla_v2/checkpoint-700"
     # model_path = "vila-u-7b-256"
+    model_path = eval_args.model_path
     model = vila_u.load(model_path)
     print("Loaded model from: ", model_path)
 
@@ -111,7 +120,8 @@ if __name__ == "__main__":
         tokenizer=tokenizer,
         data_args=data_args,
         # vision_tower=vision_tower,
-        action_tokenizer=action_tokenizer
+        action_tokenizer=action_tokenizer,
+        model_type=eval_args.mode,
     )
 
     print(f"Eval Dataset length: {len(eval_dataset)}")
@@ -137,7 +147,7 @@ if __name__ == "__main__":
     errors = []
     valid = 0
     repaired = 0
-    N = 500
+    N = eval_args.N
     st_all = time.time()
     for i in range(N):
         first_raw = eval_dataset.get_raw(i)
@@ -166,7 +176,7 @@ if __name__ == "__main__":
         # print("Next Batch: ", next_batch)
         
         st = time.time()
-        output_id = model.generate_vla([curr_img, instruction])[0].clone()
+        output_id = model.generate_vla([curr_img, instruction])[0].clone() # ?? generate_vla
 
         et = time.time()
         print("model generate took: ", round(et-st, 2), "seconds")
@@ -177,8 +187,8 @@ if __name__ == "__main__":
         # output_id[-1] = 32006
 
         # for COT VLA, start (32004) position 4, end (32005) position -1, total length 5 * 7 + 5
-        # Base VLA, start (32004) position 3, end (32005) position -1, total length 5 * 7 + 3
-        # Latent VLA, start (32005) position 2, end (32006) position -1, total length 5 * 7 + 4
+        # Base VLA, start (32004) position 3, end (32005) position -1, total length 5 * 7 + 2
+        # Latent VLA, start (32005) position 2, end (32006) position -1, total length 5 * 7 + 3
         #
 
         repair_flag = False

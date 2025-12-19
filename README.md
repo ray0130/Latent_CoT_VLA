@@ -1,121 +1,147 @@
-# VILA-U: a Unified Foundation Model Integrating Visual Understanding and Generation
+# Latent CoT VLA
 
-\[[Online Demo](https://vila-u.hanlab.ai)\] \[[Paper](https://arxiv.org/abs/2409.04429#)\] \[[Project](https://hanlab.mit.edu/projects/vila-u)\] \[[Models](https://huggingface.co/collections/mit-han-lab/vila-u-7b-6716f7dd5331e4bdf944ffa6)\]
+Yueh An Liao, Ray Wen
 
+Below are the steps to reproduce our findings.
 
-<p align="left">
-    <img src="assets/method1.jpg"  width="1200">
-</p>
+## Environment setup
 
-<p align="center">
-<b> Figure 1: Multi-token in, Multi-token out Training and Inference. </b>
-</p>
+Our code works with VILA-U's original environment set up.
 
-<p align="left">
-    <img src="assets/method2.jpg"  width="1200">
-</p>
+To set up, activate your conda environment first, and then run `./environment_setup.sh`
 
-<p align="center">
-<b> Figure 2: Unified Foundation Vision Tower. </b>
-</p>
+Or if you would like the script to create a conda environment for you, you can run `./environment_setup.sh <conda env name>`
 
+**Note**: VILA-U's set up script replaces the packages transformer files with several of their own included in `vila_u/train/transformers_replace` so please make sure you are in a dedicated environment so these changes do not affect other projects.
 
-## News
+## Data Retrieval
 
-- \[2025/01\] 🎉 VILA-U has been accepted to ICLR2025!
-- \[2024/10\] Online demo of VILA-U is available: [https://vila-u.hanlab.ai](https://vila-u.hanlab.ai). Have a try!
-- \[2024/10\] We release the code and [models](https://huggingface.co/collections/mit-han-lab/vila-u-7b-6716f7dd5331e4bdf944ffa6) for VILA-U!
+To obtain data, please run the script `dataset_5n_7fg.py`
 
-## Abstract
+you can set the `MAX_EPISODES` and `OUTPUT_DIR` to create a larger train dataset and a smaller eval dataset, stored in the same directory.
 
-**VILA-U** is a **U**nified foundation model that integrates **V**ideo, **I**mage, **La**nguage understanding and generation. Traditional visual language models (VLMs) use separate modules for understanding and generating visual content, which can lead to misalignment and increased complexity. In contrast, VILA-U employs a single autoregressive next-token prediction framework for both tasks, eliminating the need for additional components like diffusion models. This approach not only simplifies the model but also achieves near state-of-the-art performance in visual language understanding and generation. The success of VILA-U is attributed to two main factors: the unified vision tower that aligns discrete visual tokens with textual inputs during pretraining, which enhances visual perception, and autoregressive image generation can achieve similar quality as diffusion models with high-quality dataset. This allows VILA-U to perform comparably to more complex models using a fully token-based autoregressive framework.
+After running this file twice and generating one train and one eval dataset, you should have 2 directories containing shards of data, and they both share the same parent directory `data_path`
 
-## Preparation
+## Training Model
 
-### Environment Setup
+### Latent CoT VLA
 
-```bash
-git clone https://github.com/mit-han-lab/vila-u
-cd vila-u
-./environment_setup.sh vila-u
-```
+Before you train your Latent CoT VLA model, make sure your `data_path` set in `vila_u/train/train.py` is set correctly to your parent directory of your train and eval created in the previous step.
 
-### Download Models
+You should also download VILA-U's pretrained model by following their steps listed in their repository and put it in this level: [download vila-u pretrained model](https://github.com/mit-han-lab/vila-u?tab=readme-ov-file#download-models)
 
-Please download our [models](https://huggingface.co/collections/mit-han-lab/vila-u-7b-6716f7dd5331e4bdf944ffa6) from HuggingFace.
+To train the Latent CoT VLA model, you can run `./scripts/train/train_latent_cotvla.sh`, which is a modified version of VILA-U's original train script.
 
-```bash
-git lfs install
-git clone https://huggingface.co/mit-han-lab/vila-u-7b-256
-```
+Within that script file, you will find different settings that you can change, such as `global_bs` and `acc_step` to control device and global batch sizes. Eval and save strategy, warm up ratio, learning rate etc. And this script by default will report to Weights & Biases.
 
-## Usage
+Running the training script will save your models in the `checkpoints/model_name` directory.
 
-### Gradio Demo
+## Evaluation
 
-Run the following command to launch a local gradio demo:
-```bash
-CUDA_VISIBLE_DEVICES=0 python app.py --model_path path/to/your_downloaded_model
-```
+After you have finished training your model, below are the steps to run our token level evaluation and generation evaluation scripts.
 
-### Command Line Inference
+### Token Level Accuracy Evaluation
+
+To run token level accuracy evaluation, please first navigate into `cot_vla_inference.py` and change the `data_path` variable to point to your parent data directory (the one that has both `train` and `eval` in it).
+You can also adjust the `max_batches` to None to evaluate the full `eval` dataset
+
+Then you can run the evaluation script by:
 
 ```bash
-# Image Understanding
-CUDA_VISIBLE_DEVICES=0 python inference.py --model_path path/to/your_downloaded_model --image_path assets/example_image1.jpg --query "Can you describe what is happening?"
+python cot_vla_inference.py --mode Latent --model_path path/to/your/checkpoints/model_name
 ```
+
+After this script finishes running, it should output the final result dictionary at the final line of output.
+
+### Generation Evaluation
+
+To run generation evaluation, The process is similar to the Token Level Accuracy. 
+Please navigate into `mse_gen_inference.py` and change the `data_path` variable to point to your parent data directory (the one that has both `train` and `eval` in it).
+
+Then you can run the evaluation script by:
 
 ```bash
-# Video Understanding
-CUDA_VISIBLE_DEVICES=0 python inference.py --model_path path/to/your_downloaded_model --video_path assets/example_video1.mp4 --query "Elaborate on the visual and narrative elements of the video in detail."
+python mse_gen_inference.py --mode Latent --model_path path/to/your/checkpoints/model_name
 ```
+
+Similarly, this script's final output line should be the dictionary that holds the evaluation metrics.
+
+# Other Models
+
+To train and run evaluation on the two other models, please follow the steps listed below carefully:
+
+## Train
+
+To train either CoTVLA or VLA models, please make the following modifications to the script:
+
+```python
+# In vila_u/train/train.py
+model_type = "COT" # Or "VLA" if you want to train vla
+# You should also set the data directory correctly, same as above
+data_path = "path/to/your/parent/data/directory"
+```
+
+You will also have to adjust code a little bit by removing the trainable subgoal head and subgoal token. Due to VILA-U's nature of hardcoding special token IDs, you will also need to slightly adjust the indexing of special tokens. Specifically, you need to make adjustments in the following files:
+
+In `vila_u/model/vila_u_arch.py`:
+
+```python
+# Inside prepare_inputs_labels_for_multimodal()
+img_start_token_id = self.llm.vocab_size - 4 - 2 # Change to -2 because we are no long adding subgoal_token into our vocabulary
+# Inside initialize_vision_tokenizer()
+# Remove SUBGOAL_TOKEN from BOTH the tokenizer.add_tokens function calls
+num_new_tokens = tokenizer.add_tokens([ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN], special_tokens=True)
+num_new_tokens = tokenizer.add_tokens([ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
+```
+
+In `vila_u/model/language_model/vila_u_llama.py`:
+
+```python
+# Inside __init__ of VILAULlamaModel
+# Comment out the instantiation of 
+self.subgoal_head
+
+# Within forward()
+# Set 
+extra_tokens = 2 # Because we removed SUBGOAL_TOKEN earlier
+```
+
+After these changes, you should be able to train the model using the original training bash script `./scripts/train/train_latent_cotvla.sh` and you can adjust the `output_dir` in this bash script to align well with your designed model.
+
+## Evaluation
+
+To run evaluation scripts, please keep the changes made in the Train section as it is also needed for evaluation and generation.
+<!-- you will also need to make a couple more adjustments in addition to the ones mentioned in the training section above. This is so that the model type is chosen correctly and the repair action sequence logic is working correctly. -->
+
+### Token Level Accuracy Evaluation
+
+For Token Level Accuracy Evaluation, you can follow the same steps listed in the Latent Model one, changing the `data_dir` and `max_batches` and running the script with: (`model_type = "COT" or "VLA"`)
 
 ```bash
-# Image Generation
-CUDA_VISIBLE_DEVICES=0 python inference.py --model_path path/to/your_downloaded_model --prompt "A snowy mountain." --save_path path/to/save_images --generation_nums 8
+python cot_vla_inference.py --mode model_type --model_path path/to/your/checkpoints/model_name
 ```
 
-```bash
-# Video Generation
-CUDA_VISIBLE_DEVICES=0 python inference.py --model_path path/to/your_downloaded_model --prompt "Fireworks in the air." --video_generation True --save_path path/to/save_videos
+### Generation
+
+For Generation Evaluation, you will also need to make a couple more adjustments in addition to the ones mentioned in the training section above. This is so that the model type is chosen correctly and the repair action sequence logic is working correctly.
+
+Inside `mse_gen_inference.py`:
+
+```python
+action_start_id = 32004
+action_end_id = 32005
+start_position = 4 # 4 is for COT, change to 2 if you are running VLA
 ```
 
-### Evaluation
+Inside `vila_u/model/vila_u_arch.py`:
 
-Evaluate VILA-U on visual language benchmarks with the following command:
-```bash
-vila_u-eval -m path/to/model -c vicuna_v1 -ti local
-```
-Please refer to `vila_u/cli/eval.py` for more argument details.
-
-### Training
-
-Note: Please prepare data before training. Data preparation details are in the file `vila_u/data/datasets_mixture.py`.
-
-```bash
-# Pretrain
-srun -p your_slurm_partition -N 8 -t 04:00:00 -A your_slurm_account -J vila-u:pretrain --gpus-per-node 8 --exclusive --dependency singleton bash scripts/train/pretrain.sh &
+```python
+# In generate_vla()
+length = 40 # 40 is for COT, change to 38 if you are running VLA
 ```
 
-```bash
-# SFT
-srun -p your_slurm_partition -N 8 -t 04:00:00 -A your_slurm_account -J vila-u:sft --gpus-per-node 8 --exclusive --dependency singleton bash scripts/train/sft.sh &
-```
+# Code Adaptation
 
-## Acknowledgment
+This project is adapted and forked from VILA-U's open source project: [VILA-U](https://github.com/mit-han-lab/vila-u)
 
-We thank Zhijian Liu from NVIDIA for his assistance with the evaluation setup.
-
-## Citation
-
-If you find VILA-U useful or relevant to your project and research, please kindly cite our paper:
-
-```bibtex
-@article{wu2024vila,
-  title={Vila-u: a unified foundation model integrating visual understanding and generation},
-  author={Wu, Yecheng and Zhang, Zhuoyang and Chen, Junyu and Tang, Haotian and Li, Dacheng and Fang, Yunhao and Zhu, Ligeng and Xie, Enze and Yin, Hongxu and Yi, Li and others},
-  journal={arXiv preprint arXiv:2409.04429},
-  year={2024}
-}
-```
-
+The action tokenizer is adapted from OpenVLA's open source Action Tokenizer: [Open VLA Action Tokenizer](https://github.com/openvla/openvla/blob/main/prismatic/vla/action_tokenizer.py)

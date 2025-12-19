@@ -717,9 +717,13 @@ class VILAUMetaForCausalLM(ABC):
         # COT VLA prompt
         # conversation = [{"from": "human", "value": prompt}, {"from": "gpt", "value": f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IM_END_TOKEN}\n{ACTION_START}"}]
         # Base VLA prompt
-        conversation = [{"from": "human", "value": prompt}, {"from": "gpt", "value": f" "}]
+        # conversation = [{"from": "human", "value": prompt}, {"from": "gpt", "value": f" "}]
         # Latent VLA prompt
-        conversation = [{"from": "human", "value": prompt}, {"from": "gpt", "value": f"{SUBGOAL_TOKEN}"}]
+        # conversation = [{"from": "human", "value": prompt}, {"from": "gpt", "value": f"{SUBGOAL_TOKEN}"}]
+
+        # Let model generate image tokens too
+        conversation = [{"from": "human", "value": prompt}]
+        
         media = extract_media(conversation, self.config)
 
         if "image" in media:

@@ -190,13 +190,15 @@ if __name__ == "__main__":
         # Base VLA, start (32004) position 2, end (32005) position -1, total length 5 * 7 + 3
         # Latent VLA, start (32005) position 3, end (32006) position -1, total length 5 * 7 + 4
         #
-
+        action_start_id = 32005
+        action_end_id = 32006
+        start_position = 4
         repair_flag = False
-        if output_id[3] != 32005:
-            output_id[3] = 32005
+        if output_id[start_position] != action_start_id:
+            output_id[start_position] = action_start_id
             repair_flag = True
-        if output_id[-1] != 32006:
-            output_id[-1] = 32006
+        if output_id[-1] != action_end_id:
+            output_id[-1] = action_end_id
             repair_flag = True
         
         if repair_flag:

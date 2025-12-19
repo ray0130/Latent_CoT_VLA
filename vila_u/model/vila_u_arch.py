@@ -602,10 +602,10 @@ class VILAUMetaForCausalLM(ABC):
         if model_args.mm_use_im_start_end:
             if model_args.mm_use_vi_start_end:
                 # print("ADDING NEW TOKENS HERE")
-                num_new_tokens = tokenizer.add_tokens([ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN], special_tokens=True)
+                num_new_tokens = tokenizer.add_tokens([SUBGOAL_TOKEN, ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN, DEFAULT_VI_START_TOKEN, DEFAULT_VI_END_TOKEN], special_tokens=True)
             else:
                 # print("ADDING NEW TOKENS HERE")
-                num_new_tokens = tokenizer.add_tokens([ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
+                num_new_tokens = tokenizer.add_tokens([SUBGOAL_TOKEN, ACTION_START, ACTION_END, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
             self.resize_token_embeddings(len(tokenizer))
 
             if num_new_tokens > 0:
@@ -745,7 +745,7 @@ class VILAUMetaForCausalLM(ABC):
         generation_config = generation_config or self.default_generation_config
         # generation_config['max_length'] = 512
         print("generation_config, ", generation_config)
-        length = 35 + 5 # Modify length here based on model type, 
+        length = 35 + 4 # Modify length here based on model type, 
         output_ids = self.generate(input_ids=input_ids, images=images, generation_config=generation_config, max_new_tokens=length, min_new_tokens=length)
         # print("image ids: ", image_ids)
         # response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()

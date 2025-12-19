@@ -48,51 +48,45 @@ def make_cotvla_data_module(tokenizer, data_args, training_args, model):
     """
     Creates the CoT-VLA specific dataset and collator.
     """
-    # 1. Load Action Stats (binned action file)
-    # You might want to add 'action_bins_path' to DataArguments
-    # action_bins_path = getattr(data_args, "action_bins_path", "./test_data/action_bin_edges.npy") 
+    # Load Action Tokenizer
     
     print("skipping loading action")
     # print(f"Loading action tokenizer stats from {action_bins_path}...")
-    # bin_edges = np.load(action_bins_path)
-    # action_stats = {"min": bin_edges[:, 0], "max": bin_edges[:, -1]}
     
     action_tokenizer = ActionTokenizer(
         tokenizer=tokenizer,
-        # action_bins=bin_edges
     )
 
-    # 2. Extract the Vision Tower (RQ-VAE) to pass to the dataset
-    # VILA-U structure: model -> get_vision_tower() -> vision_tower -> rqvaesiglip
-    # Adjust this access path based on exact repo structure if it errors
-    vision_tower = model.get_vision_tower()
-    # data_path = "data/rt1_100ss_20keps"
-    data_path = "data/rt1_100ss_20keps"
+    # Load Data
+    data_path = "./data/rt1_100ss_5n_7fg"
     print(f"Loading CoT Data From: {data_path}")
+
+    model_type = "Latent"
 
     # 3. Create Dataset
     train_dataset = ShardedCoTVLADataset(
         data_dir=os.path.join(data_path, "train"), # Path to folder containing .npz shards
         tokenizer=tokenizer,
         data_args=data_args,
-        # vision_tower=vision_tower,
-        action_tokenizer=action_tokenizer
+        action_tokenizer=action_tokenizer,
+        model_type=model_type
     )
     eval_dataset = ShardedCoTVLADataset(
         data_dir=os.path.join(data_path, "eval"), # Path to folder containing .npz shards
         tokenizer=tokenizer,
         data_args=data_args,
-        # vision_tower=vision_tower,
-        action_tokenizer=action_tokenizer
+        action_tokenizer=action_tokenizer,
+        model_type=model_type
     )
 
+    # Data diagnostics print first example
     print(f"Train Dataset length: {len(train_dataset)}")
     print(f"Eval Dataset length: {len(eval_dataset)}")
 
     print("Printing Train Dataset First Example:")
     print(train_dataset[0])
     x = train_dataset[0]
-    pad_id = tokenizer.pad_token_id  # often 0 for LLaMA-style tokenizers
+    pad_id = tokenizer.pad_token_id 
     clean_ids = [pad_id if x == -200 else x for x in x['input_ids']]
     print("Decoded Input: ")
     x_og_decode = tokenizer.decode(clean_ids, skip_special_tokens=False)
@@ -105,25 +99,23 @@ def make_cotvla_data_module(tokenizer, data_args, training_args, model):
     print("Reference GT: ")
     print(train_dataset.print_raw(0))
 
-    # 4. Create Collator
+    # Create Collator
     data_collator = CoTVLADataCollator(
         tokenizer=tokenizer,
         data_args=data_args,
     )
-# tokenizer=tokenizer,
-#     data_args=data_args,
-#     action_tokenizer=action_tokenizer,
-# )
-    # 5. 
+
+    # Set dataset lengths
     training_args.sample_lens = [len(train_dataset)]
     training_args.eval_sample_lens = [len(eval_dataset)]
+
+    print(f"length of datasets: {training_args.sample_lens}, {training_args.eval_sample_lens}")
 
     return dict(
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
     )
-    # return dict(train_dataset=train_dataset, eval_dataset=None, data_collator=data_collator)
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):

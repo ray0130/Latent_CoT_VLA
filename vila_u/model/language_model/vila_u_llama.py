@@ -365,7 +365,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
                 extra_tokens = num_extra_tokens
             else:
                 extra_tokens = 3 # Latent: 3, COT: 2
-            print(f"in vila_u_llama.py: extra_tokens = {extra_tokens}")
+            # print(f"in vila_u_llama.py: extra_tokens = {extra_tokens}")
             im_start_tok_id = self.llm.vocab_size - 4 - extra_tokens
             im_end_tok_id = self.llm.vocab_size - 3 - extra_tokens
             video_start_tok_id = self.llm.vocab_size - 2 - extra_tokens
@@ -398,7 +398,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         # For video
         image_hidden_states_aux = []
         image_labels_aux = []
-        print(f"image_hidden_states: {image_hidden_states}")
+        # print(f"image_hidden_states: {image_hidden_states}")
         # print("Image Hidden State: ", len(image_hidden_states), image_hidden_states[0].shape, image_hidden_states)
         image_hidden_states_length = [img.shape[0] for img in image_hidden_states]
         # print("Image hidden state length:", image_hidden_states_length)

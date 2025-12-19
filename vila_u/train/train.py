@@ -158,62 +158,19 @@ def smart_tokenizer_and_embedding_resize(
         input_embeddings[-num_new_tokens:] = input_embeddings_avg
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
 
-# def remap_and_reinit_action_tokens(
-#     tokenizer,
-#     model,
-#     action_tokens,
-#     init_std=0.02
-# ):
-#     vocab = tokenizer.get_vocab()
-#     id_to_token = {v: k for k, v in vocab.items()}
-
-#     vocab_size = tokenizer.vocab_size
-#     num_actions = len(action_tokens)
-
-#     target_ids = list(range(vocab_size - num_actions, vocab_size))
-
-#     # Remap token strings at those ids
-#     for tok, idx in zip(action_tokens, target_ids):
-#         id_to_token[idx] = tok
-
-#     # Rebuild vocab into token -> id format
-#     new_vocab = {tok: idx for idx, tok in id_to_token.items()}
-
-#     # Update tokenizer vocab (LlamaTokenizer does not have _tokenizer.model)
-#     tokenizer.vocab = new_vocab
-
-#     # Reinitialize input embeddings
-#     input_emb = model.get_input_embeddings().weight
-#     for idx in target_ids:
-#         torch.nn.init.normal_(input_emb.data[idx], mean=0.0, std=init_std)
-
-#     # Reinitialize output embeddings if untied
-#     try:
-#         output_emb = model.get_output_embeddings().weight
-#         tied = output_emb is input_emb
-#     except:
-#         output_emb = None
-#         tied = True
-
-#     if not tied:
-#         for idx in target_ids:
-#             torch.nn.init.normal_(output_emb.data[idx], mean=0.0, std=init_std)
-
-#     return target_ids
 
 ##############
 # Code to Freeze part of LM
 ##############
 def freeze_all_llm_layers(model):
-    # model.llm is the underlying LLaMA in VILA U
+    # freeze all llm
     for p in model.llm.parameters():
         p.requires_grad = False
 
 def unfreeze_last_n_llm_layers(model, last_n=2, unfreeze_lm_head=True):
-    # Inspect once in a Python shell if needed: print(model.llm)
-    # In LLaMA this is usually model.llm.model.layers
+    # freeze last n layers of llm
     transformer = model.llm.model
-    layers = transformer.layers  # this is a list or ModuleList
+    layers = transformer.layers 
 
     for layer in layers[-last_n:]:
         for p in layer.parameters():
@@ -224,24 +181,13 @@ def unfreeze_last_n_llm_layers(model, last_n=2, unfreeze_lm_head=True):
             p.requires_grad = True
 
 def make_vila_trainable_subset(model, last_n_llm_layers=0):
-    # 1. Freeze everything in the LLM
-    # freeze_all_llm_layers(model)
+    
     print(f"Unfreezing last {last_n_llm_layers} Layers")
-    # 2. Optionally unfreeze a few top LLM layers
+    # freeze last n layer and print trainable param
     if last_n_llm_layers > 0:
         unfreeze_last_n_llm_layers(model, last_n=last_n_llm_layers)
 
-    # 3. Keep vision tower frozen
-    # vt = model.get_vision_tower()
-    # for p in vt.parameters():
-    #     p.requires_grad = False
-
-    # # 4. Train only mm projector (and maybe other small heads)
-    # mm_proj = model.get_mm_projector()
-    # for p in mm_proj.parameters():
-    #     p.requires_grad = True
-
-    # You can print stats to confirm
+    # Print stats
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable params: {trainable / 1e6:.1f}M out of {total / 1e6:.1f}M")

@@ -187,16 +187,16 @@ if __name__ == "__main__":
         # output_id[-1] = 32006
 
         # for COT VLA, start (32004) position 4, end (32005) position -1, total length 5 * 7 + 5
-        # Base VLA, start (32004) position 3, end (32005) position -1, total length 5 * 7 + 2
-        # Latent VLA, start (32005) position 2, end (32006) position -1, total length 5 * 7 + 3
+        # Base VLA, start (32004) position 2, end (32005) position -1, total length 5 * 7 + 3
+        # Latent VLA, start (32005) position 3, end (32006) position -1, total length 5 * 7 + 4
         #
 
         repair_flag = False
-        if output_id[4] != 32004:
-            output_id[4] = 32004
+        if output_id[3] != 32005:
+            output_id[3] = 32005
             repair_flag = True
-        if output_id[-1] != 32005:
-            output_id[-1] = 32005
+        if output_id[-1] != 32006:
+            output_id[-1] = 32006
             repair_flag = True
         
         if repair_flag:

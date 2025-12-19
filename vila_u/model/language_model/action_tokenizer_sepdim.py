@@ -221,5 +221,5 @@ class ActionTokenizer:
 
     @property
     def vocab_size(self) -> int:
-        # Number of action bins (per dimension). This matches the previous interface.
+        # Number of action bins (per dimension).
         return self.n_bins

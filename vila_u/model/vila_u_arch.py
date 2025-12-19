@@ -387,7 +387,7 @@ class VILAUMetaForCausalLM(ABC):
                         if cur_input_ids.shape[0] < -1 * cur_in_idx:
                             # fall back to original index of -3 this only happens in inference and we do not care about labels here
                             cur_in_idx = -3
-                        img_start_token_id = self.llm.vocab_size - 4 - 2 # 3 because we add additional ACTION_START, ACTION_END, SUBGOAL_IMAGE
+                        img_start_token_id = self.llm.vocab_size - 4 - 3 # 3 because we add additional ACTION_START, ACTION_END, SUBGOAL_IMAGE
                         # print(cur_in_idx, cur_input_ids)
                         # print(img_start_token_id, cur_new_labels)
                         # print((cur_input_ids[cur_in_idx] == -200 and img_start_token_id in cur_new_labels[-1]))

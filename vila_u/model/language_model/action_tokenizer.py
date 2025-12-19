@@ -3,7 +3,7 @@ action_tokenizer.py
 
 Extension class; wraps base LLM/VLM tokenizer with logic to discretize and tokenize continuous robot actions.
 
-From OpenVLA: https://github.com/openvla/openvla
+Adapted from OpenVLA: https://github.com/openvla/openvla/blob/main/prismatic/vla/action_tokenizer.py
 """
 
 from typing import List, Union

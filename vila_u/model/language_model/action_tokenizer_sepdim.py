@@ -1,3 +1,8 @@
+"""
+
+
+Adapted from OpenVLA: https://github.com/openvla/openvla/blob/main/prismatic/vla/action_tokenizer.py
+"""
 import numpy as np
 from typing import Union, List, Sequence
 from transformers import PreTrainedTokenizerBase

@@ -125,19 +125,19 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         # If there is a custom save_pretrained on VILAUMetaModel, this will run it.
         # Otherwise fallback to the standard PreTrainedModel.save_pretrained.
         self.save_pretrained(save_dir)
-    # import torch
 
     def build_cot_vla_attention_mask(self, input_ids, pad_mask, dtype=torch.float32):
         """
+        currently not in use due to cuda error
         input_ids: (B, S) long
         pad_mask: (B, S) bool or 0/1, 1 means not pad
         Returns: additive mask of shape (B, 1, S, S)
         """
-        ACTION_START_ID = self.llm.vocab_size - 2 #tokenizer.convert_tokens_to_ids(ACTION_START)
+        ACTION_START_ID = self.llm.vocab_size - 2
         print("ACTION_START_ID:", ACTION_START_ID)
         print("present?", (input_ids[0] == ACTION_START_ID).any())
         device = input_ids.device
-        pad_mask = pad_mask.to(dtype=dtype)   # 1 for real tokens, 0 for pad
+        pad_mask = pad_mask.to(dtype=dtype)
         B, S = pad_mask.shape
 
         # how many tokens at the end should be full attention
@@ -159,7 +159,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
 
             # length of full-attention tail for this sequence
             tail_len = min(FULL_BLOCK_LEN, seq_len_b)
-            start_full = seq_len_b - tail_len   # index where full-attention region starts
+            start_full = seq_len_b - tail_len
 
             # region before the tail: standard causal
             if start_full > 0:
@@ -170,16 +170,10 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
 
         # enforce padding constraint
         mixed = mixed * base_valid  # zero out any attention involving pads
-        # print("Mixed mask Logical: ")
-        # for bb in range(mixed.shape[0]):
-        #     for i in range(mixed.shape[1]):
-        #         print(mixed.shape, mixed[bb, i, :])
-        # convert to additive 4D mask
-        # 1 => allowed => 0
-        # 0 => disallowed => large negative
+        
         finfo = torch.finfo(dtype)
-        additive = (1.0 - mixed) * finfo.min  # (B, S, S)
-        additive = additive.unsqueeze(1)      # (B, 1, S, S)
+        additive = (1.0 - mixed) * finfo.min
+        additive = additive.unsqueeze(1)
 
         return additive
 
@@ -289,12 +283,12 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
                     return_tensors="pt",
                 )
                 clip_pixel_values = clip_inputs["pixel_values"].to(device, dtype=hidden_states.dtype)
-                target_embed = self.subgoal_clip.get_image_features(pixel_values=clip_pixel_values)  # (B, clip_dim)
+                target_embed = self.subgoal_clip.get_image_features(pixel_values=clip_pixel_values)
                 target_embed = F.normalize(target_embed, dim=-1)
             
             
             # Find Subgoal Position in new_labels
-            label0 = new_labels[:, :, 0]  # (B, L)
+            label0 = new_labels[:, :, 0]
             subgoal_positions = []
             
             for b in range(B):

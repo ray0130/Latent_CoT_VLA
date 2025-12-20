@@ -41,7 +41,7 @@ python vila_u/train/train_mem.py \
     --save_total_limit 1 \
     --learning_rate 5e-5 \
     --weight_decay 0.01 \
-    --warmup_ratio 0.01 \
+    --warmup_ratio 0.07 \
     --lr_scheduler_type "cosine" \
     --logging_steps 1 \
     --tf32 True \

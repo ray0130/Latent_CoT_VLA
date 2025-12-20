@@ -48,39 +48,10 @@ if __name__ == "__main__":
         N: int # number of samples
 
     parser = HfArgumentParser((EvalArguments, DataArguments))
-    # data_args = cast(Tuple[DataArguments], parser.parse_args_into_dataclasses())[0]
+    
     eval_args, data_args = parser.parse_args_into_dataclasses()
     
-    # parser = argparse.ArgumentParser()
-    # # parser.add_argument("--model_path", type=str, required=True)
-    # ### image/video understanding arguments
-    # parser.add_argument("--image_path", type=str, default=None)
-    # parser.add_argument("--video_path", type=str, default=None)
-    # parser.add_argument("--query", type=str, default=None)
-    # parser.add_argument("--temperature", type=float, default=0.9, help="The value of temperature for text generation.")
-    # parser.add_argument("--top_p", type=float, default=0.6, help="The value of top-p for text generation.")
-    # ### image and video generation arguments
-    # parser.add_argument("--prompt", type=str, default=None)
-    # parser.add_argument("--video_generation", type=bool, default=False)
-    # parser.add_argument("--cfg", type=float, default=3.0, help="The value of the classifier free guidance for image generation.")
-    # parser.add_argument("--save_path", type=str, default="generated_images/")
-    # parser.add_argument("--generation_nums", type=int, default=1)
-    # args = parser.parse_args()
-
-    # if args.model_path is not None:
-    #     model = vila_u.load(args.model_path)
-    # else:
-    #     raise ValueError("No model path provided!")
-
-    # model_path = "checkpoints/cot_vla_20keps"
-    # model_path = "checkpoints/cotvla_v1/checkpoint-100"
-    # model_path = "checkpoints_v2/tmps_v3_overfit8"
-    # model_path = "./checkpoints/cotvla_vfix"
-    # model_path = "checkpoints/latent_cotvla/step420_save"
-    # model_path = "checkpoints/latent_cotvla/checkpoint-560"
-    # model_path = "checkpoints/tmp_latent_cotvla/checkpoint-220"
-    # model_path = "checkpoints_v2/base_vla_v2/checkpoint-700"
-    # model_path = "vila-u-7b-256"
+    
     model_path = eval_args.model_path
     model = vila_u.load(model_path)
     print("Loaded model from: ", model_path)
@@ -88,13 +59,7 @@ if __name__ == "__main__":
     vision_tower = model.get_vision_tower()
     print("Vision Tower:", vision_tower)
     print(vision_tower.config, vision_tower.is_loaded)
-    # # img_proc = CLIPImageProcessor(
-    # #         size={"height": 256, "width": 256}, 
-    # #         crop_size={"height": 256, "width": 256}, 
-    # #         image_mean=[0.5, 0.5, 0.5], 
-    # #         image_std=[0.5, 0.5, 0.5]
-    # #     )
-    # image_tokens = 256
+    
 
     # Manually write data args
     data_args.image_processor = vision_tower.image_processor
@@ -160,20 +125,7 @@ if __name__ == "__main__":
 
         print("Image: ", curr_img)
         print("Instruction: ", instruction)
-        # data_collator = CoTVLADataCollator(
-        #     tokenizer=tokenizer,
-        #     data_args=data_args,
-        # )
-
-        # dataloader = DataLoader(
-        #     eval_dataset,
-        #     batch_size=2,
-        #     collate_fn=data_collator
-        # )
-        # # Get next batch
-        # data_iterator = iter(dataloader)
-        # next_batch = next(data_iterator)
-        # print("Next Batch: ", next_batch)
+        
         
         st = time.time()
         output_id = model.generate_vla([curr_img, instruction])[0].clone() # ?? generate_vla
@@ -241,31 +193,3 @@ if __name__ == "__main__":
 
     print("Entire generate took: ", round(time.time()-st_all, 2), "seconds")
     # output_token_decode = tokenizer.decode(outputs, skip_special_tokens=False)
-
-    # if args.query is not None:
-    #     generation_config = model.default_generation_config
-    #     generation_config.temperature = args.temperature
-    #     generation_config.top_p = args.top_p
-    #     if args.image_path is not None:
-    #         image = vila_u.Image(args.image_path)
-    #         response = model.generate_content([image, args.query])
-    #         print("\033[1;32mResponse:\033[0m", response)
-    #         exit()
-    #     elif args.video_path is not None:
-    #         video = vila_u.Video(args.video_path)
-    #         response = model.generate_content([video, args.query])
-    #         print("\033[1;32mResponse:\033[0m", response)
-    #         exit()
-    #     else:
-    #         raise ValueError("No visual content input!")
-    # elif args.prompt is not None:
-    #     if args.video_generation:
-    #         response = model.generate_video_content(args.prompt, args.cfg, args.generation_nums)
-    #         save_video(response, args.save_path)
-    #         exit()
-    #     else:
-    #         response = model.generate_image_content(args.prompt, args.cfg, args.generation_nums)
-    #         save_image(response, args.save_path)
-    #         exit()
-    # else:
-    #     raise ValueError("No query or prompt provided!")

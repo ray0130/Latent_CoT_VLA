@@ -177,23 +177,6 @@ def generate_video_prompt(num_video_frames: int, video_key_frame_interval: Optio
 
     return prompt
 
-# # 2. Build conversation: human with image token + instruction, assistant initially empty
-        # user_text = f"{DEFAULT_IMAGE_TOKEN}\n{instruction}"
-
-        # conversation = [
-        #     {"from": "human", "value": user_text},
-        #     {"from": "gpt",   "value": ""},
-        # ]
-        # sources = [conversation]
-
-        # # 3. Use VILA preprocessing to build prompt token ids
-        # sources = preprocess_multimodal(copy.deepcopy(sources), self.data_args)
-        # data_dict = preprocess(
-        #     sources,
-        #     self.tokenizer,
-        #     has_image=True,
-        #     no_system_prompt=getattr(self.data_args, "no_system_prompt", False),
-        # )
 
 
 class ShardedCoTVLADataset(Dataset):
@@ -222,11 +205,8 @@ class ShardedCoTVLADataset(Dataset):
         data_args,
         action_tokenizer,
         model_type, # "COT" | "VLA" | else ("Latent")
-        # subgoal_img_processor,
-        # act_start_token: str = "<action_start>",
-        # act_end_token: str = "<action_end>",
         shard_suffix: str = ".npz",
-        shard_size: int = 100,     # <--- NEW: all shards assumed to have fixed size
+        shard_size: int = 100,
     ) -> None:
         super().__init__()
 
@@ -243,8 +223,6 @@ class ShardedCoTVLADataset(Dataset):
         self.act_start_id = tokenizer.convert_tokens_to_ids(ACTION_START)
         self.act_end_id   = tokenizer.convert_tokens_to_ids(ACTION_END)
 
-        # self.act_start_id = 1 #tokenizer.convert_tokens_to_ids(ACTION_START)
-        # self.act_end_id   = 2 #tokenizer.convert_tokens_to_ids(ACTION_END)
 
         assert self.act_start_id != tokenizer.unk_token_id, (
             f"{ACTION_START} not found in tokenizer vocabulary."
@@ -262,14 +240,12 @@ class ShardedCoTVLADataset(Dataset):
         if not shard_paths:
             raise ValueError(f"No .npz shards found in {data_dir}")
 
-        # self.shard_paths = [shard_paths[0]]
         self.shard_paths = shard_paths
         self.num_shards = len(self.shard_paths)
 
         # Global dataset length = num_shards * shard_size
         self._len = self.num_shards * self.shard_size
-        # TMP Set total length to 8
-        # self._len = 100
+
         print(f"Found {self.num_shards} shards with shardsize {self.shard_size}; total dataset size = {self._len}")
 
         self.type = model_type # "COT" | "VLA" | else ("Latent")
@@ -330,7 +306,7 @@ class ShardedCoTVLADataset(Dataset):
         else:
             instruction = str(instr_arr[local_idx])
 
-        # 1. Process both images
+        # Process both images
         curr_pil    = Image.fromarray(curr_img_np)
         subgoal_pil = Image.fromarray(subgoal_img_np)
 
@@ -366,7 +342,7 @@ class ShardedCoTVLADataset(Dataset):
         else:
             instruction = str(instr_arr[local_idx])
 
-        # 1. Process both images
+        # Process both images
         curr_pil    = Image.fromarray(curr_img_np)
 
         curr_image_tensor = process_image(curr_pil, self.data_args, image_folder=None)
@@ -399,9 +375,8 @@ class ShardedCoTVLADataset(Dataset):
             image_for_model = curr_image_tensor
             gpt_value   = f"{SUBGOAL_TOKEN}"
 
-        # 2. Build conversation:
-        #    human: <image>\ninstruction
-        #    gpt:   <image>\n
+        # Build conversation:
+
         human_value = f"{DEFAULT_IMAGE_TOKEN}\n{instruction}"
         # gpt_value   = f"{DEFAULT_IMAGE_TOKEN}\n"
         # gpt_value   = f" "
@@ -421,25 +396,23 @@ class ShardedCoTVLADataset(Dataset):
             no_system_prompt=getattr(self.data_args, "no_system_prompt", True),
         )
 
-        # input_ids_base = torch.tensor(data_dict["input_ids"][0], dtype=torch.long)
-        # labels_base    = torch.tensor(data_dict["labels"][0],    dtype=torch.long)
+
         input_ids_base = data_dict["input_ids"][0].clone().detach().long()
         labels_base    = data_dict["labels"][0].clone().detach().long()
 
-        # print("Dataset sanity check input ids and labels")
-        # print("input ids: ", input_ids_base)
-        # print("labels ids: ", labels_base)
 
-        # 3. Append actions on the assistant side
+        # Append actions on the assistant side
         action_ids = self._tokenize_action(action_vec)
         act_start  = torch.tensor([self.act_start_id], dtype=torch.long)
         act_end    = torch.tensor([self.act_end_id],   dtype=torch.long)
 
         action_seq = torch.cat([act_start, action_ids, act_end], dim=0)
 
+        # Previous method was concatenating action sequence after EOS
         # full_input_ids = torch.cat([input_ids_base, action_seq], dim=0)
         # full_labels    = torch.cat([labels_base,    action_seq.clone()], dim=0)
-        # 4. Splice actions *before* EOS if EOS exists
+
+        # Splice actions 
         eos_id = self.tokenizer.eos_token_id
         if eos_id is None:
             # Fallback - some tokenizers do not set eos_token_id
@@ -454,31 +427,29 @@ class ShardedCoTVLADataset(Dataset):
             input_before = input_ids_base[:eos_pos]
             labels_before = labels_base[:eos_pos]
 
-            eos_input = input_ids_base[eos_pos:eos_pos + 1]   # [EOS]
-            eos_label = labels_base[eos_pos:eos_pos + 1]      # usually EOS label
+            eos_input = input_ids_base[eos_pos:eos_pos + 1]
+            eos_label = labels_base[eos_pos:eos_pos + 1]
 
-            # Now: [prompt + subgoal image tokens] + [act_start, actions, act_end] + [EOS]
+            #  [prompt + subgoal image tokens] + [act_start, actions, act_end] + [EOS]
             full_input_ids = torch.cat([input_before, action_seq, eos_input], dim=0)
             full_labels    = torch.cat([labels_before, action_seq.clone(), eos_label], dim=0)
         else:
             # No EOS found - fallback to old behavior (actions after entire sequence)
             full_input_ids = torch.cat([input_ids_base, action_seq], dim=0)
             full_labels    = torch.cat([labels_base, action_seq.clone()], dim=0)
-        # full_input_ids = input_ids_base
-        # full_labels = labels_base
-        # print("LABEL IN DATASET", full_labels)
+        
         if self.type == "Latent":
             return {
                 "input_ids": full_input_ids,
                 "labels": full_labels,
-                "image": image_for_model,  # [2, 3, H, W]
+                "image": image_for_model,
                 "subgoal_img": subgoal_pil
             }
             # subgoal_pil
         return {
             "input_ids": full_input_ids,
             "labels": full_labels,
-            "image": image_for_model,  # [2, 3, H, W]
+            "image": image_for_model,
         }
 
 
@@ -488,7 +459,7 @@ class ShardedCoTVLADataset(Dataset):
 @dataclass
 class CoTVLADataCollator:
     tokenizer: transformers.PreTrainedTokenizer
-    data_args: object  # DataArguments, used only for dummy image size if needed
+    data_args: object
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         input_ids_list = [inst["input_ids"] for inst in instances]
@@ -496,24 +467,24 @@ class CoTVLADataCollator:
         images_list    = [inst.get("image", None) for inst in instances]
         subgoal_list    = [inst.get("subgoal_img", None) for inst in instances]
 
-        # 1. Pad input_ids
+        # Pad input_ids
         input_ids = torch.nn.utils.rnn.pad_sequence(
             input_ids_list,
             batch_first=True,
             padding_value=self.tokenizer.pad_token_id,
         )
 
-        # 2. Pad labels
+        # Pad labels
         labels = torch.nn.utils.rnn.pad_sequence(
             labels_list,
             batch_first=True,
             padding_value=IGNORE_INDEX,
         )
 
-        # 3. Attention mask
+        # Attention mask
         attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
 
-        # 4. Stack images into [B, 2, 3, H, W]
+        # Stack images into [B, 2, 3, H, W]
         valid_images = [img for img in images_list if img is not None]
         valid_subgoal_images =[img for img in subgoal_list if img is not None]
         # if len(valid_subgoal_images) > 0:
@@ -522,13 +493,11 @@ class CoTVLADataCollator:
         if len(valid_images) > 0:
             processed = []
             for img in valid_images:
-                # Allowed shapes:
-                #   [3, H, W]        -> single image
-                #   [N, 3, H, W]     -> N images (we expect N == 2 here)
+                
                 if img.ndim == 3:
-                    img = img.unsqueeze(0)   # [1, 3, H, W]
+                    img = img.unsqueeze(0)
                 elif img.ndim == 4:
-                    pass                    # [N, 3, H, W]
+                    pass
                 else:
                     raise ValueError(f"Unexpected image shape in collator: {img.shape}")
                 processed.append(img)

@@ -253,28 +253,7 @@ if __name__ == "__main__":
 
     parser = HfArgumentParser((EvalArguments, DataArguments))
     eval_args, data_args = parser.parse_args_into_dataclasses()
-    # data_args = cast(Tuple[DataArguments], parser.parse_args_into_dataclasses())[0]
     
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("--model_path", type=str, required=True)
-    # ### image/video understanding arguments
-    # parser.add_argument("--image_path", type=str, default=None)
-    # parser.add_argument("--video_path", type=str, default=None)
-    # parser.add_argument("--query", type=str, default=None)
-    # parser.add_argument("--temperature", type=float, default=0.9, help="The value of temperature for text generation.")
-    # parser.add_argument("--top_p", type=float, default=0.6, help="The value of top-p for text generation.")
-    # ### image and video generation arguments
-    # parser.add_argument("--prompt", type=str, default=None)
-    # parser.add_argument("--video_generation", type=bool, default=False)
-    # parser.add_argument("--cfg", type=float, default=3.0, help="The value of the classifier free guidance for image generation.")
-    # parser.add_argument("--save_path", type=str, default="generated_images/")
-    # parser.add_argument("--generation_nums", type=int, default=1)
-    # args = parser_0.parse_args()
-
-    # if args.model_path is not None:
-    #     model = vila_u.load(args.model_path)
-    # else:
-    #     raise ValueError("No model path provided!")
 
     # model_path = "checkpoints/latent_cotvla/checkpoint-560" # cotvla_vfix | latent_cotvla/checkpoint-560 | checkpoints/base_vla_v2/checkpoint-700
     model_path = eval_args.model_path
@@ -285,13 +264,7 @@ if __name__ == "__main__":
     vision_tower = model.get_vision_tower()
     print("Vision Tower:", vision_tower)
     print(vision_tower.config, vision_tower.is_loaded)
-    # # img_proc = CLIPImageProcessor(
-    # #         size={"height": 256, "width": 256}, 
-    # #         crop_size={"height": 256, "width": 256}, 
-    # #         image_mean=[0.5, 0.5, 0.5], 
-    # #         image_std=[0.5, 0.5, 0.5]
-    # #     )
-    # image_tokens = 256
+    
 
     # Manually write data args
     data_args.image_processor = vision_tower.image_processor

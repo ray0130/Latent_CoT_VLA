@@ -200,15 +200,6 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         num_extra_tokens: Optional[int] = None, # Latent: 3, COT: 2
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
-        # print("SUBGOAL IMAGES: ", subgoal_images)
-        # print("Initial Input IDS: ", input_ids.shape, input_ids.min(), input_ids.max())
-        # print(input_ids[0])
-        # # initial_input_ids = input_ids
-        # print("position ids: ", position_ids)
-
-        # print("Images: ", images.shape, images)
-
-        # print("labels: ", labels.shape, labels)
         
         if inputs_embeds is None:
             # print("input embed is none")
@@ -228,11 +219,6 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
                 images,
             )
         
-        # print("Input embed before repack multimodal data: ", inputs_embeds.shape)
-        # print(inputs_embeds)
-        # print("Input IDS before repack multimodal data: ")
-        # print(input_ids)
-        # print("Label before repack multimodal: ", labels.shape, labels[0])
         if self.training:
             (
                 _,
@@ -260,29 +246,19 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
             sorted_seqlens_in_batch = attention_mask.sum(-1).int()
             new_input_ids = input_ids
 
-        # print("After repack, New Input embeds: ", new_inputs_embeds.shape, new_inputs_embeds.min(), new_inputs_embeds.max())
-        # print(new_inputs_embeds)
-        # print("After repack, new Labels ", new_labels.shape)
-        # print(new_labels)
-        # print("self llm: ", self.llm)
+        
         output_attentions = output_attentions if output_attentions is not None else self.llm.config.output_attentions
-        # print("input ids: ", input_ids)
-        # print("new attention mask pads:", new_attention_mask)
-
 
         # Code to create mixed attention (Causal + Full) mask
         # Currently not in use due to CUDA Error
         # custom_mixed_attention_mask = self.build_cot_vla_attention_mask(initial_input_ids, new_attention_mask, dtype=new_inputs_embeds.dtype)
         
-        # print("Output attention shape: ", output_attentions)
-        # print("attention mask: ",new_attention_mask.shape, new_attention_mask)
-        # print("custom_mixed_attention_mask: ", custom_mixed_attention_mask.shape)
+        
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.llm.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.llm.config.use_return_dict
 
-        # print("Input embeds to insert into model: ", inputs_embeds.shape, inputs_embeds)
         outputs = self.llm.model(
             input_ids=new_input_ids,
             attention_mask=new_attention_mask,
@@ -317,14 +293,10 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
                 target_embed = F.normalize(target_embed, dim=-1)
             
             
-            # print("target std", target_embed.std(dim=0).mean().item())
-
             # Find Subgoal Position in new_labels
             label0 = new_labels[:, :, 0]  # (B, L)
             subgoal_positions = []
-            # print("New labels: ", new_labels.shape, new_labels)
-            # print("label 0: , ", label0.shape, label0)
-            # print('subgoal image position: and stored version', self.llm.vocab_size - 3, self.subgoal_token_id)
+            
             for b in range(B):
                 pos = (label0[b] == self.subgoal_token_id).nonzero(as_tuple=False)
                 if pos.numel() == 0:
@@ -352,15 +324,13 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         image_hidden_states = []
         image_labels = []
         noimage_labels = []
-        # print("hidden state: ", hidden_states)
+        
         for i in range(hidden_states.shape[0]):
             label = new_labels[i]
-            # print("LABEL: ", label)
+            
             hidden_state = hidden_states[i]
             label_zero = label[:, 0].clone()
-            # print("img label starts: ", self.llm.vocab_size - 4, self.llm.vocab_size - 3, self.llm.vocab_size - 2, self.llm.vocab_size - 1)
-            # print("NEW img label starts: ", self.llm.vocab_size - 6, self.llm.vocab_size - 5, self.llm.vocab_size - 4, self.llm.vocab_size - 3)
-            # print("label zero:", label_zero)
+            
             if num_extra_tokens is not None:
                 extra_tokens = num_extra_tokens
             else:
@@ -424,8 +394,7 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
         image_loss = None
         if torch.is_tensor(image_hidden_states):
             if hasattr(self.vision_tower.vision_tower, "rqvaesiglip"):
-                # print("image_labels: ", image_labels)
-                # print("IMAGE LABEL SHIFTED: ",image_labels - self.llm.vocab_size)
+                
                 outs = self.vision_tower.vision_tower.rqtransformer(image_hidden_states, image_labels - self.llm.vocab_size, self.vision_tower.vision_tower.rqvaesiglip)
             else:
                 raise NotImplementedError()
@@ -434,16 +403,15 @@ class VILAULlamaModel(VILAUMetaModel, VILAUMetaForCausalLM, PreTrainedModel):
             image_labels = image_labels.reshape(B*seq_len*D).contiguous() - self.llm.vocab_size
             image_loss = loss_fct(image_logits, image_labels)
 
-        # print("my no img label: ", noimage_labels.shape, noimage_labels)
+        
         loss = None
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = noimage_labels[..., 1:].contiguous()
-        # print("before view shift_labels: ", shift_labels.shape, shift_labels.min(), shift_labels.max(), shift_labels)
+        
         shift_logits = shift_logits.view(-1, self.llm.config.vocab_size)
         shift_labels = shift_labels.view(-1)
         shift_labels = shift_labels.to(shift_logits.device)
-        # print("shifted logits: ", shift_logits)
-        # print(" shift_labels: ", shift_labels.shape, shift_labels.min(), shift_labels.max(), shift_labels)
+        
         loss = loss_fct(shift_logits, shift_labels)
         action_loss = loss
 

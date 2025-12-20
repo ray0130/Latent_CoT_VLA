@@ -293,9 +293,9 @@ class VILAUMetaForCausalLM(ABC):
             images = images.flatten(0, 1)
 
         input_image_ids = input_ids[input_ids == IMAGE_TOKEN_INDEX]
-        # print("input image ids", input_image_ids.shape)
+        
         image_features, tokens = self.encode_images(images, input_image_ids)
-        # print("encoded img token and features: ", image_features.shape, tokens.shape)
+        
         _labels = labels
         _position_ids = position_ids
         _attention_mask = attention_mask
@@ -314,12 +314,7 @@ class VILAUMetaForCausalLM(ABC):
         input_ids_copy = input_ids.clone()
         input_ids_copy[input_ids_copy == IMAGE_TOKEN_INDEX] = 0
         input_embeds = self.llm.model.embed_tokens(input_ids_copy)
-        # print("right after llm model embed tokens input embeds: ", input_embeds.shape, input_embeds)
-        # for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask):
-        #     print(f"Input IDS range: {cur_input_ids.min()}, {cur_input_ids.max()}")
-        #     print(f"attention Mask range: {cur_attention_mask.min()}, {cur_attention_mask.max()}")
-        #     print(f"Shapes in VILA Model: input ids{cur_input_ids.shape}, attention mask: {cur_attention_mask.shape}")
-        #     x = cur_input_ids[cur_attention_mask] # Should fail at some point
+        
             
         input_ids = [
             cur_input_ids[cur_attention_mask] for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)
@@ -333,11 +328,11 @@ class VILAUMetaForCausalLM(ABC):
         new_input_embeds = []
         new_labels = []
         cur_image_idx = 0
-        # print("input ids shape: ", len(input_ids))
+        
         for batch_idx, cur_input_ids in enumerate(input_ids):
             cur_input_ids = input_ids[batch_idx]
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
-            # print("NUM IMG: ", num_images)
+            
             if num_images == 0:
                 cur_image_features = image_features[0]
                 cur_input_embeds_1 = input_embeds_1[batch_idx]
@@ -345,14 +340,14 @@ class VILAUMetaForCausalLM(ABC):
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx].unsqueeze(1).expand(-1, tokens.shape[-1]))
                 continue
-            # print("num_images: ", num_images)
+            
             cur_input_embeds = input_embeds_1[batch_idx]
             image_token_indices = (
                 [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
             )
-            # print("IN PREPARE: image_token_indices:", image_token_indices, torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist(), cur_input_ids.shape[0])
+            
             cur_labels = labels[batch_idx]
-            # print("IN PREPARE CUR LABELS: ",cur_labels)
+            
             cur_input_ids_noim = []
             cur_labels_noim = []
             cur_input_embeds_no_im = []
@@ -361,7 +356,7 @@ class VILAUMetaForCausalLM(ABC):
                 cur_input_ids_noim.append(cur_input_ids[image_token_indices[i] + 1 : image_token_indices[i + 1]])
                 cur_labels_noim.append(cur_labels[image_token_indices[i] + 1 : image_token_indices[i + 1]])
                 cur_input_embeds_no_im.append(cur_input_embeds[image_token_indices[i] + 1 : image_token_indices[i + 1]])
-                # print(cur_labels[image_token_indices[i] + 1 : image_token_indices[i + 1]])
+                
 
             split_sizes = [x.shape[0] for x in cur_labels_noim]
             cur_new_input_embeds = []
@@ -371,14 +366,12 @@ class VILAUMetaForCausalLM(ABC):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i].unsqueeze(1).expand(-1, tokens.shape[-1]))
                 if i < num_images:
-                    # print("inputting image features for ", cur_image_idx)
+                    
                     cur_image_features = image_features[cur_image_idx]
                     cur_tokens = tokens[cur_image_idx]
                     cur_new_input_embeds.append(cur_image_features)
                     if self.config.mm_use_vi_start_end:
-                        # print("appending cur new labels USING ALL IGNORE INDEX")
-                        # print("printing condition")
-                        # print(all(x == -200 for x in cur_input_ids[-10:-3]))
+                        
 
                         # Original code hard coded this as -3, but we need to shift the index as our action sequence is after image
                         # So the -200 image token idx would be a -3 (original) - 32 * 7 (# action tokens) - 2 (action start/end tokens)
@@ -388,19 +381,13 @@ class VILAUMetaForCausalLM(ABC):
                             # fall back to original index of -3 this only happens in inference and we do not care about labels here
                             cur_in_idx = -3
                         img_start_token_id = self.llm.vocab_size - 4 - 3 # 3 because we add additional ACTION_START, ACTION_END, SUBGOAL_IMAGE
-                        # print(cur_in_idx, cur_input_ids)
-                        # print(img_start_token_id, cur_new_labels)
-                        # print((cur_input_ids[cur_in_idx] == -200 and img_start_token_id in cur_new_labels[-1]))
-                        # print("first cur_input_ids condition: ", cur_input_ids[cur_in_idx] == -200, cur_input_ids[cur_in_idx], cur_input_ids)
-                        # print("second condition: ", self.llm.vocab_size - 4, cur_new_labels[-1], self.llm.vocab_size - 4 in cur_new_labels[-1])
-                        # print("NEW second condition: ", img_start_token_id, cur_new_labels[-1], img_start_token_id in cur_new_labels[-1])
-                        # print("#### end condition ####")
+                        
                         if (cur_input_ids[cur_in_idx] == -200 and img_start_token_id in cur_new_labels[-1]) \
                              or all(x == -200 for x in cur_input_ids[-10:-3]):
                             cur_new_labels.append(cur_tokens)
-                            # print("appending cur new labels here")
+                            
                         else:
-                            # print("appending cur new labels USING ALL IGNORE INDEX")
+                            
                             cur_new_labels.append(
                                 torch.full(
                                     (cur_image_features.shape[0], tokens.shape[-1]),
@@ -446,7 +433,7 @@ class VILAUMetaForCausalLM(ABC):
             dtype=new_labels[0].dtype,
             device=new_labels[0].device,
         )
-        # print("new_labels_padded shape: ", new_labels_padded.shape)
+        
         attention_mask = torch.zeros(
             (batch_size, max_len),
             dtype=attention_mask.dtype,
@@ -511,8 +498,7 @@ class VILAUMetaForCausalLM(ABC):
 
         if _position_ids is None:
             position_ids = None
-        # print("Prepare new input embeds", new_input_embeds.shape, new_input_embeds)
-        # print("Prepare New labels", new_labels.shape, new_labels)
+        
         return (
             None,
             position_ids,
@@ -703,8 +689,8 @@ class VILAUMetaForCausalLM(ABC):
         print("input ids to pass into self.generate(): ", input_ids)
         # generation_config['max_length'] = 512
         print("generation_config, ", generation_config)
-        image_ids = self.generate(input_ids=input_ids, images=images, attention_mask=attention_mask, cfg=3.0, max_new_tokens=self.vision_tower.image_tokens, use_cache=True)
-        print("generated image ids: ", image_ids)
+        output_ids = self.generate(input_ids=input_ids, images=images, attention_mask=attention_mask, cfg=3.0, max_new_tokens=self.vision_tower.image_tokens, use_cache=True)
+        # print("generated image ids: ", image_ids)
         # output_ids = self.generate(input_ids=input_ids, images=images, generation_config=generation_config, max_new_tokens=self.vision_tower.image_tokens+2+5 * 7)
         # print("image ids: ", image_ids)
         # response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
@@ -721,7 +707,7 @@ class VILAUMetaForCausalLM(ABC):
         # Latent VLA prompt
         # conversation = [{"from": "human", "value": prompt}, {"from": "gpt", "value": f"{SUBGOAL_TOKEN}"}]
 
-        # Let model generate image tokens too
+        # Let model generate image tokens directly instead of providing it
         conversation = [{"from": "human", "value": prompt}]
         
         media = extract_media(conversation, self.config)
